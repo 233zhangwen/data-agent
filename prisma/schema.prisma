@@ -1,0 +1,399 @@
+// 数据问答 Agent — 数据模型
+//
+// 两套表，职责完全不同：
+//   ① 业务表（21 张）：演示数据，Agent 通过**只读账号**查询。这份 schema 相当于
+//      "被分析的那家公司"，真实存在但没有业务代码写它 —— 只有 seed 脚本往里灌数据。
+//   ② 应用表（2 张）：项目自己的状态（表结构向量索引、用户保存的查询）。
+//
+// 命名：Prisma 里 camelCase，`@map` / `@@map` 到 snake_case。
+// 理由：真实业务库就是 snake_case，且 Agent 生成的 SQL 不用处处加引号 ——
+// "忘记给 PascalCase 表名加引号"这类语法错不是我们要考的能力，它会污染评测。
+//
+// Prisma 7：generator 用 "prisma-client" 且 output 必填；连接地址在 prisma7.config.ts。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// 一、维度表（两条业务线共用）
+// ============================================================
+
+model Region {
+  id         Int        @id @default(autoincrement())
+  name       String     @unique
+  code       String     @unique
+  customers  Customer[]
+  employees  Employee[]
+  warehouses Warehouse[]
+
+  @@map("regions")
+}
+
+model Channel {
+  id        Int        @id @default(autoincrement())
+  name      String     @unique
+  customers Customer[]
+  orders    Order[]
+
+  @@map("channels")
+}
+
+model Employee {
+  id              Int             @id @default(autoincrement())
+  name            String
+  /// sales | support
+  role            String
+  regionId        Int? @map("region_id")
+  region          Region?         @relation(fields: [regionId], references: [id])
+  hiredAt         DateTime @map("hired_at")
+  orders          Order[]
+  supportTickets  SupportTicket[]
+
+  @@index([regionId])
+  @@map("employees")
+}
+
+// ============================================================
+// 二、电商业务线
+// ============================================================
+
+model Customer {
+  id               Int                 @id @default(autoincrement())
+  name             String
+  /// individual | business
+  type             String
+  email            String              @unique
+  regionId         Int @map("region_id")
+  region           Region              @relation(fields: [regionId], references: [id])
+  channelId        Int @map("channel_id")
+  channel          Channel             @relation(fields: [channelId], references: [id])
+  signedUpAt       DateTime @map("signed_up_at")
+  orders           Order[]
+  subscriptions    Subscription[]
+  couponRedemptions CouponRedemption[]
+  supportTickets   SupportTicket[]
+
+  @@index([regionId])
+  @@index([channelId])
+  @@index([signedUpAt])
+  @@map("customers")
+}
+
+model Category {
+  id       Int       @id @default(autoincrement())
+  name     String
+  parentId Int? @map("parent_id")
+  parent   Category? @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+model Product {
+  id          Int              @id @default(autoincrement())
+  name        String
+  categoryId  Int @map("category_id")
+  category    Category         @relation(fields: [categoryId], references: [id])
+  brand       String
+  basePrice   Decimal @db.Decimal(12, 2) @map("base_price")
+  /// active | discontinued
+  status      String
+  launchedAt  DateTime @map("launched_at")
+  variants    ProductVariant[]
+
+  @@index([categoryId])
+  @@map("products")
+}
+
+model ProductVariant {
+  id          Int         @id @default(autoincrement())
+  productId   Int @map("product_id")
+  product     Product     @relation(fields: [productId], references: [id])
+  sku         String      @unique
+  name        String
+  price       Decimal     @db.Decimal(12, 2)
+  inventory   Inventory[]
+  orderItems  OrderItem[]
+
+  @@index([productId])
+  @@map("product_variants")
+}
+
+model Warehouse {
+  id       Int        @id @default(autoincrement())
+  name     String
+  regionId Int @map("region_id")
+  region   Region     @relation(fields: [regionId], references: [id])
+  inventory Inventory[]
+  shipments Shipment[]
+
+  @@index([regionId])
+  @@map("warehouses")
+}
+
+model Inventory {
+  id          Int            @id @default(autoincrement())
+  variantId   Int @map("variant_id")
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+  warehouseId Int @map("warehouse_id")
+  warehouse   Warehouse      @relation(fields: [warehouseId], references: [id])
+  quantity    Int
+  updatedAt   DateTime @map("updated_at")
+
+  @@unique([variantId, warehouseId])
+  @@index([warehouseId])
+  @@map("inventory")
+}
+
+model Order {
+  id             Int                @id @default(autoincrement())
+  orderNo        String @unique @map("order_no")
+  customerId     Int @map("customer_id")
+  customer       Customer           @relation(fields: [customerId], references: [id])
+  channelId      Int @map("channel_id")
+  channel        Channel            @relation(fields: [channelId], references: [id])
+  salesRepId     Int? @map("sales_rep_id")
+  salesRep       Employee?          @relation(fields: [salesRepId], references: [id])
+  /// pending | paid | shipped | delivered | cancelled | refunded
+  status         String
+  orderedAt      DateTime @map("ordered_at")
+  paidAt         DateTime? @map("paid_at")
+  totalAmount    Decimal @db.Decimal(12, 2) @map("total_amount")
+  discountAmount Decimal @db.Decimal(12, 2) @map("discount_amount")
+  shippingFee    Decimal @db.Decimal(12, 2) @map("shipping_fee")
+  items          OrderItem[]
+  shipments      Shipment[]
+  redemptions    CouponRedemption[]
+
+  @@index([customerId])
+  @@index([orderedAt])
+  @@index([status])
+  @@index([salesRepId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        Int            @id @default(autoincrement())
+  orderId   Int @map("order_id")
+  order     Order          @relation(fields: [orderId], references: [id])
+  variantId Int @map("variant_id")
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  quantity  Int
+  unitPrice Decimal @db.Decimal(12, 2) @map("unit_price")
+  subtotal  Decimal        @db.Decimal(12, 2)
+  returns   Return[]
+
+  @@index([orderId])
+  @@index([variantId])
+  @@map("order_items")
+}
+
+model Shipment {
+  id          Int        @id @default(autoincrement())
+  orderId     Int @map("order_id")
+  order       Order      @relation(fields: [orderId], references: [id])
+  warehouseId Int @map("warehouse_id")
+  warehouse   Warehouse  @relation(fields: [warehouseId], references: [id])
+  carrier     String
+  trackingNo  String @map("tracking_no")
+  shippedAt   DateTime? @map("shipped_at")
+  deliveredAt DateTime? @map("delivered_at")
+
+  @@index([orderId])
+  @@map("shipments")
+}
+
+model Return {
+  id           Int       @id @default(autoincrement())
+  orderItemId  Int @map("order_item_id")
+  orderItem    OrderItem @relation(fields: [orderItemId], references: [id])
+  quantity     Int
+  /// damaged | wrong_item | not_as_described | changed_mind | late_delivery
+  reason       String
+  refundAmount Decimal @db.Decimal(12, 2) @map("refund_amount")
+  requestedAt  DateTime @map("requested_at")
+  resolvedAt   DateTime? @map("resolved_at")
+
+  @@index([orderItemId])
+  @@index([requestedAt])
+  @@map("returns")
+}
+
+model Coupon {
+  id        Int                @id @default(autoincrement())
+  code      String             @unique
+  /// percent | fixed
+  type      String
+  value     Decimal            @db.Decimal(12, 2)
+  minSpend  Decimal @db.Decimal(12, 2) @map("min_spend")
+  validFrom DateTime @map("valid_from")
+  validTo   DateTime @map("valid_to")
+  maxUses   Int @map("max_uses")
+  redemptions CouponRedemption[]
+
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id         Int      @id @default(autoincrement())
+  couponId   Int @map("coupon_id")
+  coupon     Coupon   @relation(fields: [couponId], references: [id])
+  orderId    Int @map("order_id")
+  order      Order    @relation(fields: [orderId], references: [id])
+  customerId Int @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id])
+  usedAt     DateTime @map("used_at")
+
+  @@index([couponId])
+  @@index([usedAt])
+  @@map("coupon_redemptions")
+}
+
+// ============================================================
+// 三、SaaS 业务线
+// ============================================================
+
+model Plan {
+  id           Int            @id @default(autoincrement())
+  name         String
+  code         String         @unique
+  monthlyPrice Decimal @db.Decimal(12, 2) @map("monthly_price")
+  annualPrice  Decimal @db.Decimal(12, 2) @map("annual_price")
+  seatPrice    Decimal @db.Decimal(12, 2) @map("seat_price")
+  maxSeats     Int @map("max_seats")
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id          Int                      @id @default(autoincrement())
+  customerId  Int @map("customer_id")
+  customer    Customer                 @relation(fields: [customerId], references: [id])
+  planId      Int @map("plan_id")
+  plan        Plan                     @relation(fields: [planId], references: [id])
+  /// active | trialing | past_due | canceled
+  status      String
+  /// monthly | annual
+  billingCycle String @map("billing_cycle")
+  seats       Int
+  startedAt   DateTime @map("started_at")
+  canceledAt  DateTime? @map("canceled_at")
+  seatChanges SubscriptionSeatChange[]
+  invoices    Invoice[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("subscriptions")
+}
+
+model SubscriptionSeatChange {
+  id             Int          @id @default(autoincrement())
+  subscriptionId Int @map("subscription_id")
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id])
+  delta          Int
+  seatsAfter     Int @map("seats_after")
+  changedAt      DateTime @map("changed_at")
+
+  @@index([subscriptionId])
+  @@map("subscription_seat_changes")
+}
+
+model Invoice {
+  id             Int          @id @default(autoincrement())
+  subscriptionId Int @map("subscription_id")
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id])
+  periodStart    DateTime @map("period_start")
+  periodEnd      DateTime @map("period_end")
+  amount         Decimal      @db.Decimal(12, 2)
+  /// paid | open | void
+  status         String
+  issuedAt       DateTime @map("issued_at")
+  dueAt          DateTime @map("due_at")
+  payments       Payment[]
+
+  @@index([subscriptionId])
+  @@index([issuedAt])
+  @@index([status])
+  @@map("invoices")
+}
+
+model Payment {
+  id        Int      @id @default(autoincrement())
+  invoiceId Int @map("invoice_id")
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+  amount    Decimal  @db.Decimal(12, 2)
+  /// alipay | wechat | bank_transfer | card
+  method    String
+  /// succeeded | failed | refunded
+  status    String
+  paidAt    DateTime? @map("paid_at")
+
+  @@index([invoiceId])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ============================================================
+// 四、服务
+// ============================================================
+
+model SupportTicket {
+  id           Int       @id @default(autoincrement())
+  customerId   Int @map("customer_id")
+  customer     Customer  @relation(fields: [customerId], references: [id])
+  assignedToId Int? @map("assigned_to_id")
+  assignedTo   Employee? @relation(fields: [assignedToId], references: [id])
+  subject      String
+  /// billing | technical | shipping | product | account
+  category     String
+  /// low | normal | high | urgent
+  priority     String
+  /// open | pending | resolved | closed
+  status       String
+  openedAt     DateTime @map("opened_at")
+  closedAt     DateTime? @map("closed_at")
+
+  @@index([customerId])
+  @@index([status])
+  @@index([openedAt])
+  @@map("support_tickets")
+}
+
+// ============================================================
+// 五、应用表（项目自己的状态，Agent 只读账号**没有**这两张表的访问权）
+// ============================================================
+
+/// 表结构的向量索引。21 张表的 schema 塞不进 context，用检索挑相关的几张。
+/// docText 是给人（和模型）读的一句话说明 + 关键列，不是 DDL 原文 ——
+/// DDL 太长且噪声大（类型、默认值、约束），模型真正需要的是"这张表回答什么问题"。
+model SchemaDoc {
+  id        Int                       @id @default(autoincrement())
+  tableName String @unique @map("table_name")
+  docText   String @map("doc_text")
+  /// bge-m3，1024 维；用 Unsupported 是因为 Prisma 不认识 vector 类型
+  embedding Unsupported("vector(1024)")?
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("schema_docs")
+}
+
+/// 用户在对话里确认保存的查询（`save_query` 工具的落点，见 spec 第 3 节）
+model SavedQuery {
+  id        Int      @id @default(autoincrement())
+  title     String
+  sql       String
+  question  String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("saved_queries")
+}
