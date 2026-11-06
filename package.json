@@ -1,0 +1,42 @@
+{
+  "name": "data-agent",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run tests/unit",
+    "seed": "node --experimental-transform-types scripts/seed.mts",
+    "seed:reset": "node --experimental-transform-types scripts/seed.mts --reset"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.109",
+    "@ai-sdk/react": "^4.0.167",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "ai": "^7.0.163",
+    "next": "16.4.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "recharts": "^3.10.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "^4.3.4",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.2",
+    "pg": "^8.23.1",
+    "prisma": "^7.10.1",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^5",
+    "vitest": "^5.0.5"
+  }
+}

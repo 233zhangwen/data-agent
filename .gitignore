@@ -1,0 +1,23 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+/build
+
+# prisma 生成的 client（每次 prisma generate 重建，不入库）
+/src/generated
+/src/generated/prisma_tmp
+
+# 环境变量：.env.local 里有数据库密码与 API key
+.env
+.env.local
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+/tsconfig.tsbuildinfo
+/test-results/
+/playwright-report/
