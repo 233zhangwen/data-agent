@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+/*
+ * 不用 next/font/google：国内拉取 fonts.googleapis.com 会失败，
+ * 构建期打一串警告（项目 #1 实测），纯系统字体栈零依赖。
+ */
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    sans-serif;
+}
+
+code,
+pre,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
