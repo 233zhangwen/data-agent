@@ -12,7 +12,12 @@
     "lint": "eslint",
     "test": "vitest run tests/unit",
     "seed": "node --experimental-transform-types scripts/seed.mts",
-    "seed:reset": "node --experimental-transform-types scripts/seed.mts --reset"
+    "seed:reset": "node --experimental-transform-types scripts/seed.mts --reset",
+    "test:db": "vitest run tests/db",
+    "test:all": "vitest run tests",
+    "eval:recall": "vitest run eval/schema-recall.eval.ts",
+    "eval:repair": "vitest run eval/repair.eval.ts",
+    "eval:thinking": "vitest run eval/thinking.eval.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.109",

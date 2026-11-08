@@ -1,15 +1,17 @@
 /**
- * 数据问答 Agent 的核心：工具集 + 循环。
+ * 数据问答 Agent 的核心：工具集 + 循环 + 死循环防护 + 测试注入点。
  *
  * 为什么用 `ToolLoopAgent` 而不是自己写状态机（和项目 #1 的选型理由对照）：
  *   项目 #1 用 `streamText` + `stopWhen`，因为只有 1 个工具，"循环"其实就是
  *   "调一次工具再生成"两拍。这里有 6 个工具、要处理 SQL 报错重试、要做写操作审批，
  *   自己维护的状态机会长到 300 行以上，而且每加一个工具就要改一遍 —— 那才是真正的成本。
  *
- * ⚠️ thinking 参数：DeepSeek 是推理模型，不关会烧思考 token。
- *   它不在 @ai-sdk/openai 的 providerOptions schema 里（严格 zod，未知键被剥），
- *   唯一通道是 createOpenAI 的自定义 fetch 中间件。这是项目 #1 spike 阶段
- *   读包源码踩出来的，这里照搬。
+ * ⚠️ thinking 参数（W2 C15 实测修订）：deepseek-flash 当前**无法关闭思考**——
+ *   thinking:{type:'disabled'} 与 reasoning_effort:'none' 都注入到了请求体
+ *   （eval/probe-inject.eval.ts 验证），但服务端照常返回 reasoning tokens。
+ *   注入保留（端点将来恢复尊重该参数时自动生效），成本控制实际靠 MAX_STEPS。
+ *   注入走 createOpenAI 的自定义 fetch 中间件：参数不在 @ai-sdk/openai 的
+ *   providerOptions schema 里（严格 zod，未知键被剥），这是项目 #1 spike 踩出来的。
  */
 
 import { createOpenAI } from '@ai-sdk/openai';
@@ -24,6 +26,16 @@ import {
   type QueryResult,
 } from './agent-db';
 import PROMPT from './agent-prompt.json';
+import { buildChartSpec, chartErrorForModel, type ChartSpec } from './chart';
+import {
+  createLoopGuard,
+  L2_SAME_ERROR_AT,
+  l1Notice,
+  l2Notice,
+  L3_NOTICE,
+} from './loop-guard';
+import { createProposal, SaveQueryRejected } from './save-query';
+import { rankTables } from './schema-search';
 import { TABLE_DOCS, TABLE_DOC_MAP } from './schema-docs';
 
 /** 一次问答最多几步。一个有代表性的分析是：列表 → 看结构 → 查 → 改 → 查 → 作答 = 6 步。 */
@@ -37,20 +49,26 @@ const MAX_ATTEMPTS_PER_TURN = 6;
 type ProviderSettings = Parameters<typeof createOpenAI>[0];
 type FetchFn = NonNullable<ProviderSettings>['fetch'];
 
-/** 给每个请求体注入 DeepSeek 私有的 thinking 开关。 */
-const INJECT_THINKING: FetchFn = async (url, init) => {
-  const body = JSON.parse(String(init?.body));
-  body.thinking = { type: 'disabled' };
-  return fetch(url, { ...init, body: JSON.stringify(body) });
-};
+/** 给每个请求体注入 DeepSeek 私有的 thinking 开关。评测要能开关对比（C15）。 */
+function makeFetchWithThinking(thinking: 'disabled' | 'enabled'): FetchFn {
+  return async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    body.thinking = { type: thinking };
+    return fetch(url, { ...init, body: JSON.stringify(body) });
+  };
+}
 
 type Provider = ReturnType<typeof createOpenAI>;
 
 /** dev 热重载会反复执行本模块，provider 挂 globalThis 避免泄漏客户端。 */
-const globalForProvider = globalThis as unknown as { __dataAgentProvider?: Provider };
+const globalForProvider = globalThis as unknown as {
+  __dataAgentProvider?: Partial<Record<'disabled' | 'enabled', Provider>>;
+};
 
-function getProvider(): Provider {
-  if (globalForProvider.__dataAgentProvider) return globalForProvider.__dataAgentProvider;
+function getProvider(thinking: 'disabled' | 'enabled'): Provider {
+  const cache = (globalForProvider.__dataAgentProvider ??= {});
+  const cached = cache[thinking];
+  if (cached) return cached;
 
   const apiKey = process.env.LLM_API_KEY;
   const baseUrl = (process.env.LLM_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
@@ -59,9 +77,9 @@ function getProvider(): Provider {
   const provider = createOpenAI({
     apiKey,
     baseURL: baseUrl,
-    fetch: INJECT_THINKING,
+    fetch: makeFetchWithThinking(thinking),
   });
-  globalForProvider.__dataAgentProvider = provider;
+  cache[thinking] = provider;
   return provider;
 }
 
@@ -102,10 +120,44 @@ function formatForModel(r: QueryResult): string {
 
 // ---------------------------------------------------------------- 工具
 
-/** 用 jsonSchema 而不是 zod：与项目 #1 的写法保持一致，也少一层依赖转换。 */
-function makeTools() {
-  /** 每次问答的尝试计数，用来防"同一个坑里反复烧 token"。 */
-  const state = { sqlAttempts: 0, lastError: '' };
+/** 测试注入点：只在评测里构造，产品路径永远不传（docs/ACCEPTANCE-W2.md 3.1）。 */
+export type Faults = {
+  /** 文档漂移：describeTable 显示一个不存在但合理的列，诱导模型写出必然报错的 SQL。 */
+  driftColumns?: { table: string; column: string }[];
+  /** 文档漂移（反向）：把真实列从 describeTable 结果里藏掉，让幻觉列成为唯一"事实"。 */
+  hideColumns?: { table: string; column: string }[];
+};
+
+/**
+ * 用 jsonSchema 而不是 zod：与项目 #1 的写法保持一致，也少一层依赖转换。
+ *
+ * `opts.sessionId`：save_query 提案归属（无登录项目的最小隔离）。
+ * `opts.faults`：故障注入，评测专用。
+ */
+function makeTools(
+  opts: { sessionId?: string; faults?: Faults; evalFlags?: { disableL2?: boolean } } = {},
+) {
+  /** 每次问答独立的状态 —— 见 createDataAgent 的注释，绝不复用。 */
+  const state = {
+    sqlAttempts: 0,
+    lastResult: null as QueryResult | null,
+  };
+  const guard = createLoopGuard();
+
+  /**
+   * L3 无进展检测的包装：连续 N 次工具输出指纹相同 → 追加停止指令。
+   * 放在所有工具外层而不是 runSql 里，因为"每步都查同一张表"也是绕圈。
+   */
+  function withLoopGuard<A>(name: string, fn: (input: A) => Promise<string | object>) {
+    return async (input: A): Promise<string | object> => {
+      const out = await fn(input);
+      const warning = guard.track(name, typeof out === 'string' ? out : JSON.stringify(out));
+      if (!warning) return out;
+      return typeof out === 'string'
+        ? out + L3_NOTICE
+        : { ...out, loopWarning: L3_NOTICE };
+    };
+  }
 
   const listTables = tool({
     description:
@@ -117,7 +169,7 @@ function makeTools() {
       properties: {},
       required: [],
     }),
-    execute: async () => {
+    execute: withLoopGuard('listTables', async () => {
       // 行数现查：写死在文档里必然过时，而过时的数字不会报错、只会答错
       const counts = await getTableRowCounts(TABLE_DOCS.map((d) => d.table));
       return TABLE_DOCS.map((d) => {
@@ -125,7 +177,37 @@ function makeTools() {
         const size = n === undefined ? '' : `（${n} 行）`;
         return `${d.table}${size} — ${d.summary}`;
       }).join('\n');
-    },
+    }),
+  });
+
+  const searchSchema = tool({
+    description:
+      '按业务关键词检索相关表（如「复购」「退货」「订阅」「退款」）。' +
+      '问题涉及哪个业务域拿不准时用它，比 listTables 精准、比逐张 describeTable 便宜。' +
+      '返回每张表命中的关键词，方便你判断相关性。',
+    inputSchema: jsonSchema<{ query: string }>({
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '业务关键词，如「客户复购」或「退货原因」' },
+      },
+      required: ['query'],
+    }),
+    execute: withLoopGuard('searchSchema', async ({ query }: { query: string }) => {
+      const ranked = rankTables(query, TABLE_DOCS, 5);
+      if (!ranked.length) {
+        return `没有命中任何表。建议改调 listTables 浏览全部 21 张表后再决定。`;
+      }
+      const lines = ranked.map(
+        (r) => `• ${r.table} — 命中：${r.matched.join('、')}`,
+      );
+      return [
+        '与你的关键词最相关的表（按匹配度排序）：',
+        '',
+        ...lines,
+        '',
+        '下一步：用 describeTable 看其中相关表的具体列名。',
+      ].join('\n');
+    }),
   });
 
   const describeTable = tool({
@@ -139,9 +221,24 @@ function makeTools() {
       },
       required: ['table'],
     }),
-    execute: async ({ table }: { table: string }) => {
+    execute: withLoopGuard('describeTable', async ({ table }: { table: string }) => {
       const doc = TABLE_DOC_MAP.get(table);
-      const cols = await describeTableColumns(table, TABLE_DOC_MAP.keys());
+      let cols = await describeTableColumns(table, TABLE_DOC_MAP.keys());
+
+      // 测试注入（仅评测路径）：模拟「文档漂移」——多出幻觉列 / 真实列被藏
+      if (opts.faults?.driftColumns?.length) {
+        const inject = opts.faults.driftColumns.filter((f) => f.table === table);
+        for (const f of inject) {
+          cols = [...cols, { column: f.column, type: 'timestamp without time zone', nullable: true }];
+        }
+      }
+      if (opts.faults?.hideColumns?.length) {
+        const hide = new Set(
+          opts.faults.hideColumns.filter((f) => f.table === table).map((f) => f.column),
+        );
+        if (hide.size) cols = cols.filter((c) => !hide.has(c.column));
+      }
+
       const lines = [
         `${table} — ${doc?.summary ?? ''}`,
         '',
@@ -151,13 +248,14 @@ function makeTools() {
       ];
       if (doc?.pitfall) lines.push('', `⚠️ ${doc.pitfall}`);
       return lines.join('\n');
-    },
+    }),
   });
 
   const runSql = tool({
     description:
       '执行一条只读 SQL 查询并返回结果。只支持单条 SELECT 语句（CTE 可用），' +
-      '最多返回 1000 行，超时 10 秒。报错信息会原样返回，你可以据此修正 SQL 重试。',
+      '最多返回 1000 行，超时 10 秒。报错信息会原样返回，你可以据此修正 SQL 重试。' +
+      '成功的结果会被记住，可直接交给 make_chart 画图。',
     inputSchema: jsonSchema<{ sql: string }>({
       type: 'object',
       properties: {
@@ -172,7 +270,7 @@ function makeTools() {
      * 那是误导用户，而真实原因是 SQL 写错了，模型完全有能力自己修。
      * 项目 #1 在检索预算上也踩过同一个点。
      */
-    execute: async ({ sql }: { sql: string }) => {
+    execute: withLoopGuard('runSql', async ({ sql }: { sql: string }) => {
       state.sqlAttempts += 1;
       if (state.sqlAttempts > MAX_ATTEMPTS_PER_TURN) {
         return (
@@ -181,29 +279,118 @@ function makeTools() {
         );
       }
 
+      // ---- L1 完全重复：同一条 SQL（归一化后）第二次出现，直接不执行。
+      // 数据是静态的，重跑同一条查询不可能有新结果；这一步几乎零成本，
+      // 却能掐断最蠢也最常见的一种循环。
+      if (guard.seenSql(sql)) {
+        return l1Notice(state.lastResult !== null);
+      }
+      guard.markSqlSeen(sql);
+
       try {
         const result = await runReadOnlyQuery(sql);
-        state.lastError = '';
+        state.lastResult = result;
+        guard.clearErrors(); // 换了新问题，旧错误的计数清零
         return formatForModel(result);
       } catch (e) {
         if (e instanceof SqlRejected) {
           return `这条 SQL 没被执行：${e.message}。请修改后重试。`;
         }
         if (e instanceof SqlExecutionError) {
-          // 数据库的报错原样给模型 —— 它需要 position 和 hint 才能定位到具体位置
+          // ---- L2 同错重复：第 3 次撞同一个错误，说明它猜错了维度。
+          // 给的不是"别再试了"，是"换诊断方向"——这是自修从碰运气变成有策略的关键。
+          // evalFlags.disableL2 仅评测用：对比开/关 L2 的修复率（C13）。
+          const times = guard.recordError(e.code, e.message);
+
           const parts = [`SQL 执行失败：${e.message}`];
           if (e.code) parts.push(`错误码：${e.code}`);
           if (e.hint) parts.push(`提示：${e.hint}`);
           if (e.position) parts.push(`出错位置（第 ${e.position} 个字符附近）`);
-          state.lastError = e.message;
+          if (times >= L2_SAME_ERROR_AT && !opts.evalFlags?.disableL2) {
+            parts.push('', l2Notice(times));
+          }
           return parts.join('\n');
         }
         throw e;
       }
-    },
+    }),
   });
 
-  return { listTables, describeTable, runSql };
+  const makeChart = tool({
+    description:
+      '把**最近一次 runSql 的结果**画成图表。数据由系统记住，你只需要指定：' +
+      'type（bar/line/pie）、xKey、yKey（一列或多列）、title。' +
+      '参数错误会返回具体原因和可用列名，修正后重试即可。',
+    inputSchema: jsonSchema<{ type: string; title?: string; xKey: string; yKey: string | string[] }>({
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['bar', 'line', 'pie'], description: '图表类型' },
+        title: { type: 'string', description: '图表标题，可省略' },
+        xKey: { type: 'string', description: 'X 轴列名' },
+        yKey: {
+          oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+          description: '度量列（画多少），一列或多列',
+        },
+      },
+      required: ['type', 'xKey', 'yKey'],
+    }),
+    execute: withLoopGuard(
+      'makeChart',
+      async (p: {
+        type: string;
+        title?: string;
+        xKey: string;
+        yKey: string | string[];
+      }): Promise<ChartSpec | string> => {
+        try {
+          return buildChartSpec(p, state.lastResult);
+        } catch (e) {
+          return chartErrorForModel(e);
+        }
+      },
+    ),
+  });
+
+  const saveQuery = tool({
+    description:
+      '把一条有复用价值的 SQL 保存下来。**只在用户明确表达"保存"时使用**。' +
+      '调用后生成一个待确认提案（10 分钟有效），用户在前端点确认后才真正保存——' +
+      '你只需要告诉用户「已生成待确认的保存请求，请在卡片上确认」。',
+    inputSchema: jsonSchema<{ title: string; sql: string; question?: string }>({
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '查询标题，如「月度 GMV 趋势」' },
+        sql: { type: 'string', description: '要保存的 SELECT 语句' },
+        question: { type: 'string', description: '用户当时问的问题，可省略' },
+      },
+      required: ['title', 'sql'],
+    }),
+    execute: withLoopGuard(
+      'saveQuery',
+      async (p: { title: string; sql: string; question?: string }) => {
+        if (!opts.sessionId) {
+          return '保存功能需要会话上下文（cookie 丢失）。请刷新页面后重试。';
+        }
+        try {
+          const proposal = await createProposal({ sessionId: opts.sessionId, ...p });
+          return {
+            status: 'pending_confirmation' as const,
+            proposalId: proposal.proposalId,
+            title: proposal.title,
+            sql: proposal.sql,
+            expiresInMin: proposal.expiresInMin,
+          };
+        } catch (e) {
+          if (e instanceof SaveQueryRejected) {
+            return `没能生成保存提案：${e.message}`;
+          }
+          return `保存提案生成失败，请稍后重试。`;
+        }
+      },
+    ),
+  });
+
+  return { listTables, searchSchema, describeTable, runSql, makeChart, saveQuery };
 }
 
 // ---------------------------------------------------------------- agent
@@ -211,17 +398,26 @@ function makeTools() {
 /**
  * 每次请求新建一个 agent 实例。
  *
- * 不挂全局单例的原因：`makeTools()` 里的 state（尝试计数）是**每轮对话独立**的，
- * 复用实例会让上一轮的失败次数算到下一轮头上 —— 这种 bug 极难复现。
- * provider 是单例（贵），agent 是轻量的（就是几个对象的组合），每次 new 没问题。
+ * 不挂全局单例的原因：`makeTools()` 里的 state（尝试计数、上次查询结果、
+ * 循环检测指纹）是**每轮对话独立**的，复用实例会让上一轮的状态算到下一轮头上
+ * —— 这种 bug 极难复现。provider 是单例（贵），agent 是轻量的（几个对象的组合）。
+ *
+ * `opts.faults` / `opts.evalFlags` 只在评测里传，产品路径必须是 `createDataAgent({ sessionId })`。
  */
-export function createDataAgent() {
+export function createDataAgent(
+  opts: {
+    sessionId?: string;
+    faults?: Faults;
+    evalFlags?: { disableL2?: boolean };
+    thinking?: 'disabled' | 'enabled';
+  } = {},
+) {
   return new ToolLoopAgent({
-    model: getProvider()(process.env.LLM_MODEL || 'deepseek-flash'),
+    model: getProvider(opts.thinking ?? 'disabled')(process.env.LLM_MODEL || 'deepseek-flash'),
     // ToolLoopAgent 里这个字段叫 instructions（不是 streamText 的 system）——
     // 语义相同，只是 Agent 抽象把"给模型的行为说明"独立命名了。
     instructions: PROMPT.system,
-    tools: makeTools(),
+    tools: makeTools(opts),
     // 步数上限 = 账单上限。没有上限的 agent 循环 = 没有上限的成本。
     stopWhen: ({ steps }) => steps.length >= MAX_STEPS,
   });
