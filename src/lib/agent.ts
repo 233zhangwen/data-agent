@@ -26,6 +26,7 @@ import {
   type QueryResult,
 } from './agent-db';
 import PROMPT from './agent-prompt.json';
+import { CALC_DESCRIPTION, calculate, type CalcOp } from './calc';
 import { buildChartSpec, chartErrorForModel, type ChartSpec } from './chart';
 import {
   createLoopGuard,
@@ -327,6 +328,99 @@ function makeTools(
     }),
   });
 
+  /**
+   * 精确算术。存在的理由见 calc.ts 顶部（D07：六行明细全对，合计加错 15.7 万）。
+   *
+   * `fromLastQuery` 是设计里更要紧的一半：如果只让模型把数字填进 values，它得先从
+   * 表格里抄 6 个数过来，抄错一个照样错。让它直接指定列名，抄写这一步也一并消掉。
+   * 而且取的是**完整结果**（不是给模型看的前 50 行）—— 这一点必须在返回里说明，
+   * 否则模型会发现"我看到的 50 行加起来不等于它给的结果"。
+   */
+  const calc = tool({
+    description: CALC_DESCRIPTION,
+    inputSchema: jsonSchema<{
+      op: CalcOp;
+      values?: (number | string)[];
+      fromLastQuery?: { column: string };
+      expected?: number | string;
+      decimals?: number;
+      unit?: string;
+    }>({
+      type: 'object',
+      properties: {
+        op: {
+          type: 'string',
+          enum: ['sum', 'avg', 'diff', 'product', 'ratio', 'pct_change', 'verify_sum'],
+          description: '运算类型',
+        },
+        values: {
+          type: 'array',
+          items: { oneOf: [{ type: 'number' }, { type: 'string' }] },
+          description: '参与运算的数（纯数字，不要带单位）；verify_sum 时是分项',
+        },
+        fromLastQuery: {
+          type: 'object',
+          properties: { column: { type: 'string', description: '结果表里的列名' } },
+          required: ['column'],
+          description:
+            '从最近一次 runSql 的**完整结果**里取这一列作为 values（优先于 values）。' +
+            '要算一整列的和/平均时用它，比手抄数字可靠。',
+        },
+        expected: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '仅 verify_sum：你给出的合计' },
+        decimals: { type: 'number', description: '保留几位小数，默认 2' },
+        unit: { type: 'string', description: '仅用于展示，如「万元」「%」「人」' },
+      },
+      required: ['op'],
+    }),
+    execute: withLoopGuard(
+      'calc',
+      async (p: {
+        op: CalcOp;
+        values?: (number | string)[];
+        fromLastQuery?: { column: string };
+        expected?: number | string;
+        decimals?: number;
+        unit?: string;
+      }) => {
+        let values: (number | string)[] = p.values ?? [];
+        let sourceNote = '';
+
+        if (p.fromLastQuery?.column) {
+          const last = state.lastResult;
+          if (!last || !last.rows.length) {
+            return '还没有可用的查询结果。先 runSql 查出数据，或者直接把数字放进 values。';
+          }
+          const col = p.fromLastQuery.column;
+          if (!last.columns.includes(col)) {
+            return `最近一次结果里没有列「${col}」。可用列：${last.columns.join('、')}`;
+          }
+          const picked = last.rows
+            .map((row) => row[col])
+            .filter((v) => v !== null && v !== undefined)
+            .map((v) => String(v));
+          if (!picked.length) return `列「${col}」的值全是 NULL，没有可计算的数。`;
+          values = picked;
+          sourceNote = `（取自最近一次查询的 ${picked.length} 行${
+            last.rows.length > 50 ? '，含没展示给模型的行' : ''
+          }）`;
+        }
+
+        if (!values.length) {
+          return '没有可计算的数：请给 values，或用 fromLastQuery 指定列名。';
+        }
+
+        const r = calculate({
+          op: p.op,
+          values,
+          expected: p.expected,
+          decimals: p.decimals,
+          unit: p.unit,
+        });
+        return r.ok ? `${r.display}${sourceNote}\n${r.detail}` : `计算失败：${r.error}`;
+      },
+    ),
+  });
+
   const makeChart = tool({
     description:
       '把**最近一次 runSql 的结果**画成图表。数据由系统记住，你只需要指定：' +
@@ -401,7 +495,7 @@ function makeTools(
     ),
   });
 
-  return { listTables, searchSchema, describeTable, runSql, makeChart, saveQuery };
+  return { listTables, searchSchema, describeTable, runSql, calc, makeChart, saveQuery };
 }
 
 // ---------------------------------------------------------------- agent
