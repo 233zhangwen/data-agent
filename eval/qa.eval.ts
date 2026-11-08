@@ -96,13 +96,19 @@ describe('W3 C17 · 40 条标注评测集', () => {
       if (v.hit) byClass[v.cls].hit += 1;
     }
 
-    // 空答案是独立指标：混在准确率里既会低估（答对的被算错）也会掩盖（"0.95 已经很好了"）
+    // 无结论答案是独立指标：混在准确率里既会低估（答对的被算错）也会掩盖（"0.95 已经很好了"）。
+    // 判定用长度而不是「trim 后为空」：第六轮 D06 的答案是 16 个字的
+    // 「我先看一下数据库里有哪些相关表。」—— trim 不为空，但同样没有结论。
+    // 三轮实测正常答案最短 131 字（第七轮 A08），30 这条线有空档，不会误伤。
+    const NO_CONCLUSION_CHARS = 30;
     const empty = verdicts.filter((v) => v.answer.trim().length === 0);
+    const noConclusion = verdicts.filter((v) => v.answer.trim().length < NO_CONCLUSION_CHARS);
     const wrapped = verdicts.filter((v) => v.wrappedUp);
 
     const metrics = {
       accuracy: hit / n,
       emptyAnswers: empty.length,
+      noConclusion: noConclusion.length,
       wrappedUp: wrapped.length,
       caveatHonesty: caveatCases.length ? caveatOk / caveatCases.length : 0,
       avgSteps: steps,
@@ -112,7 +118,7 @@ describe('W3 C17 · 40 条标注评测集', () => {
 
     console.log('\n' + '─'.repeat(64));
     console.log(`准确率        ${hit}/${n} = ${metrics.accuracy.toFixed(2)}  (门槛 0.70)`);
-    console.log(`空答案        ${empty.length} 条  (门槛 0)`);
+    console.log(`无结论答案    ${noConclusion.length} 条（真空 ${empty.length} 条）  (门槛 0)`);
     console.log(`兜底收口      ${wrapped.length} 条`);
     console.log(`口径诚实率    ${caveatOk}/${caveatCases.length} = ${metrics.caveatHonesty.toFixed(2)}  (门槛 0.60)`);
     console.log(`平均步数      ${metrics.avgSteps.toFixed(1)}  (门槛 ≤5)`);
