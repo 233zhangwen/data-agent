@@ -18,6 +18,12 @@ export type TableDoc = {
   columns: string;
   /** ⚠️ 常见错误 */
   pitfall?: string;
+  /**
+   * 分析师黑话（W2 C8 评测驱动补的）：用户嘴里的词和 DDL 里的词往往对不上——
+   * 「实收」在 payments 文档里一个字都没出现过，检索就永远差一步。
+   * 只收真实同义词，不为了评测分数造词；这是 21 张表的人工语料，本来就该有人养。
+   */
+  synonyms?: string;
 };
 
 export const TABLE_DOCS: TableDoc[] = [
@@ -38,6 +44,7 @@ export const TABLE_DOCS: TableDoc[] = [
     summary: '员工。role 分 sales（销售，25 人）和 support（客服，15 人）。',
     columns: 'id, name, role, region_id（可空）, hired_at。被 orders.sales_rep_id 和 support_tickets.assigned_to_id 引用。',
     pitfall: '只有 sales 会出现在 orders.sales_rep_id 里；support 出现在工单里。按业绩排名要先过滤 role = \'sales\'。',
+    synonyms: '业绩、销售代表、客服人员',
   },
 
   // ---------------- 电商 ----------------
@@ -87,12 +94,14 @@ export const TABLE_DOCS: TableDoc[] = [
       '② 实收 = total_amount - discount_amount；' +
       '③ 复购要按 customer_id 去重计数，不是订单数；' +
       '④ paid_at 可能为 null（pending / cancelled）。',
+    synonyms: '销售额、成交额、GMV、下单量、客单价',
   },
   {
     table: 'order_items',
     summary: '订单明细，一行一个 SKU。',
     columns: 'id, order_id, variant_id, quantity, unit_price, subtotal。',
     pitfall: 'subtotal = quantity × unit_price，已含数量。求和不要再乘 quantity。',
+    synonyms: '销量、售出数量、成交明细',
   },
   {
     table: 'shipments',
@@ -108,6 +117,7 @@ export const TABLE_DOCS: TableDoc[] = [
       '① 退货挂在 **order_items** 上，要算到订单/品类必须再 join 一层；' +
       '② resolved_at 为 null 表示还在处理中；' +
       '③ 退货率的分母是订单明细行数，不是订单数。',
+    synonyms: '退款、售后、退单',
   },
   {
     table: 'coupons',
@@ -137,12 +147,14 @@ export const TABLE_DOCS: TableDoc[] = [
       '① MRR = 月付套餐价 + seats × 座位价，年付要除以 12；' +
       '② 算"当前活跃订阅"要过滤 status = \'active\'，canceled 的 canceled_at 不为空；' +
       '③ 流失率的分母是"期初活跃数"，不是全部订阅数。',
+    synonyms: '座位数、续费、流失',
   },
   {
     table: 'subscription_seat_changes',
     summary: '席位变更流水（扩缩容）。',
     columns: 'id, subscription_id, delta, seats_after, changed_at。',
     pitfall: 'delta 有正有负。净增席位数是 sum(delta)，不是 count(*)。',
+    synonyms: '座位、席位、扩容、缩容',
   },
   {
     table: 'invoices',
@@ -152,12 +164,14 @@ export const TABLE_DOCS: TableDoc[] = [
       '① 这是"应收"，不是"实收"—— 实收在 payments；' +
       '② 一张账单可能分多次支付（部分付款），所以 payments 行数 ≥ paid 账单数；' +
       '③ 算收入要按 period_start 归属期间，不是按 paid_at。',
+    synonyms: '应收、账单金额、账期',
   },
   {
     table: 'payments',
     summary: '支付流水。',
     columns: 'id, invoice_id, amount, method（alipay/wechat/bank_transfer/card）, status（succeeded/failed/refunded）, paid_at。',
     pitfall: '要过滤 status = \'succeeded\'，failed 的也算一笔记录但没收到钱。',
+    synonyms: '实收、到账、回款、收款',
   },
 
   // ---------------- 服务 ----------------
