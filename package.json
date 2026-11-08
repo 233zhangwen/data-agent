@@ -20,7 +20,9 @@
     "eval:thinking": "vitest run eval/thinking.eval.ts",
     "eval:qa": "vitest run eval/qa.eval.ts",
     "eval:check": "node --experimental-transform-types eval/check-qa-set.mts",
-    "test:e2e": "vitest run tests/e2e"
+    "test:e2e": "vitest run tests/e2e",
+    "eval:rejudge": "node --experimental-transform-types eval/rejudge.mts",
+    "eval:sanity": "node --experimental-transform-types eval/judge-sanity.mts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.109",
