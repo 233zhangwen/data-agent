@@ -21,6 +21,7 @@
     "eval:qa": "vitest run eval/qa.eval.ts",
     "eval:check": "node --experimental-transform-types eval/check-qa-set.mts",
     "test:e2e": "vitest run tests/e2e",
+    "eval:empty": "vitest run eval/empty-answer.eval.ts",
     "eval:rejudge": "node --experimental-transform-types eval/rejudge.mts",
     "eval:sanity": "node --experimental-transform-types eval/judge-sanity.mts"
   },

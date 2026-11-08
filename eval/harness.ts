@@ -12,6 +12,7 @@
  */
 
 import { createDataAgent, type Faults } from '../src/lib/agent';
+import { readStream, streamAgentTurn } from '../src/lib/agent-stream';
 
 export type ToolStep = { id: string; name: string; input: unknown; output: string | object };
 
@@ -19,10 +20,14 @@ export type TurnResult = {
   question: string;
   answer: string;
   tools: ToolStep[];
+  /** 实际跑了几步（= 几次模型调用）。步数上限是 MAX_STEPS，最后一格只作答。 */
+  steps: number;
   /** runSql 报错次数（≈ 重试次数；L1 拦下的重复不算——它没执行）。 */
   sqlErrors: number;
   /** 最后一次真正执行的 runSql 是否成功。 */
   lastSqlOk: boolean;
+  /** 是否走了兜底收口（步数用尽没说出话时补的那一次）。 */
+  wrappedUp: boolean;
   usage: { inputTokens: number; outputTokens: number; reasoningTokens: number; totalTokens: number };
   elapsedMs: number;
   firstTokenMs: number | null;
@@ -50,15 +55,22 @@ export async function runTurn(
   let answer = '';
 
   const tools: ToolStep[] = [];
+  let steps = 0;
   let sqlErrors = 0;
   let lastSqlOk = false;
 
-  const result = await agent.stream({
+  // 走 agent-stream（与 /api/ask 同一条路径）：兜底收口也是产品行为，
+  // 评测必须看见它，否则"空答案率 0"在线上不成立。
+  const turn = await streamAgentTurn(agent, {
     messages: [{ role: 'user' as const, content: question }],
   });
 
-  for await (const part of result.fullStream) {
+  for await (const part of readStream(turn.stream)) {
     switch (part.type) {
+      case 'start-step': {
+        steps += 1;
+        break;
+      }
       case 'text-delta': {
         if (firstTokenMs === null) firstTokenMs = Date.now() - started;
         answer += part.text;
@@ -89,13 +101,15 @@ export async function runTurn(
     }
   }
 
-  const usage = await result.usage;
+  const usage = await turn.usage;
   return {
     question,
     answer: answer.trim(),
     tools,
+    steps,
     sqlErrors,
     lastSqlOk,
+    wrappedUp: turn.report.wrappedUp,
     usage: {
       inputTokens: usage.inputTokens ?? 0,
       outputTokens: usage.outputTokens ?? 0,

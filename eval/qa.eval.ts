@@ -32,6 +32,8 @@ type Verdict = {
   detail: string;
   answer: string;
   steps: number;
+  /** 是否走了兜底收口（步数用尽后补的那一次调用）。 */
+  wrappedUp: boolean;
   tokens: number;
   firstTokenMs: number | null;
   elapsedMs: number;
@@ -50,6 +52,7 @@ function judge(c: EvalCase, r: TurnResult): Verdict {
     detail: v.detail,
     answer: r.answer,
     steps: r.tools.length,
+    wrappedUp: r.wrappedUp,
     tokens: r.usage.totalTokens,
     firstTokenMs: r.firstTokenMs,
     elapsedMs: r.elapsedMs,
@@ -71,7 +74,7 @@ describe('W3 C17 · 40 条标注评测集', () => {
       const cflag = v.caveatOk === null ? '' : v.caveatOk ? ' [口径✓]' : ' [口径✗]';
       console.log(
         `${flag} ${c.id} ${c.cls} ${String(v.steps).padStart(2)}步 ${String(v.tokens).padStart(6)}tok ` +
-        `${String(Date.now() - started).padStart(6)}ms${cflag}`,
+        `${String(Date.now() - started).padStart(6)}ms${cflag}${v.wrappedUp ? ' [兜底]' : ''}`,
       );
       if (!v.hit) console.log(`     期望 ${v.expected}\n     实答 ${v.answer.slice(0, 160).replace(/\n/g, ' ')}`);
     }
@@ -93,8 +96,14 @@ describe('W3 C17 · 40 条标注评测集', () => {
       if (v.hit) byClass[v.cls].hit += 1;
     }
 
+    // 空答案是独立指标：混在准确率里既会低估（答对的被算错）也会掩盖（"0.95 已经很好了"）
+    const empty = verdicts.filter((v) => v.answer.trim().length === 0);
+    const wrapped = verdicts.filter((v) => v.wrappedUp);
+
     const metrics = {
       accuracy: hit / n,
+      emptyAnswers: empty.length,
+      wrappedUp: wrapped.length,
       caveatHonesty: caveatCases.length ? caveatOk / caveatCases.length : 0,
       avgSteps: steps,
       avgTokens: tokens,
@@ -103,6 +112,8 @@ describe('W3 C17 · 40 条标注评测集', () => {
 
     console.log('\n' + '─'.repeat(64));
     console.log(`准确率        ${hit}/${n} = ${metrics.accuracy.toFixed(2)}  (门槛 0.70)`);
+    console.log(`空答案        ${empty.length} 条  (门槛 0)`);
+    console.log(`兜底收口      ${wrapped.length} 条`);
     console.log(`口径诚实率    ${caveatOk}/${caveatCases.length} = ${metrics.caveatHonesty.toFixed(2)}  (门槛 0.60)`);
     console.log(`平均步数      ${metrics.avgSteps.toFixed(1)}  (门槛 ≤5)`);
     console.log(`平均 token    ${Math.round(metrics.avgTokens)}  (门槛 ≤12000)`);
