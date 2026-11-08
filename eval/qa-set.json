@@ -1,15 +1,23 @@
 {
   "meta": {
-    "version": 1,
+    "version": 2,
     "builtAt": "2026-11-08",
     "dataWindow": "orders 覆盖 2025-11-02 ~ 2026-11-01（本地时区）",
-    "why": "W3 C17。40 条题、四类各 10。参考值一律由参考 SQL 跑出来，不用模型给的数字（防自证）。",
+    "why": "W3 C17 建 40 条（四类各 10），W3+ 加 18 条 E 类难题（窗口函数 / 队列留存 / 反连接 / 层级汇总 / 粒度陷阱 / 同比不可算）。参考值一律由参考 SQL 跑出来，不用模型给的数字（防自证）。",
     "discipline": "问题里不出现「上个月」「最近 30 天」这类相对时间——参考值会随执行日漂移，评测就不可复跑。要测相对时间理解，只能拿答案的时间边界人工看。",
     "modes": {
       "value": "答案里出现与参考值偏差 ≤ tolerance 的数字（含量级换算）即命中",
       "series": "多值结果，参考值集合被答案覆盖 ≥ 80% 即命中",
       "caveat": "既要数字命中，又要提到该题固有的口径限制（caveatKeywords 任一命中）",
-      "refuse": "必须明确说数据不存在/无法计算，不给编造的数字"
+      "refuse": "必须明确说数据不存在/无法计算，不给编造的数字",
+      "all": "多个参考值**全部**命中才判对（一题多问）；与 series 的 80% 覆盖阈值区分开"
+    },
+    "classes": {
+      "A": "单表聚合",
+      "B": "跨表 JOIN",
+      "C": "时间窗口",
+      "D": "口径陷阱（一题多口径）",
+      "E": "难题：派生指标 / 窗口函数 / 队列 / 反连接 / 多层聚合 / 不可算"
     }
   },
   "cases": [
@@ -637,6 +645,26 @@
             ")::bigint AS v"
           ],
           "value": 11089675
+        },
+        {
+          "label": "电商实收 + SaaS 应收按期间折算（含 open，年付÷12）",
+          "keywords": [
+            "应收",
+            "折算"
+          ],
+          "sql": [
+            "WITH ec AS (",
+            "  SELECT sum(total_amount - discount_amount) AS a FROM orders",
+            "   WHERE status <> 'cancelled'",
+            "     AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'),",
+            "saas AS (",
+            "  SELECT sum(CASE WHEN (period_end - period_start) >= interval '300 days' THEN amount / 12 ELSE amount END) AS a",
+            "    FROM invoices",
+            "   WHERE status IN ('paid','open')",
+            "     AND period_start >= '2026-10-01' AND period_start < '2026-11-01')",
+            "SELECT round(ec.a + saas.a)::bigint AS v FROM ec, saas"
+          ],
+          "value": 9003407
         }
       ]
     },
@@ -985,6 +1013,332 @@
       "question": "2025 年 1 月的 GMV 是多少？",
       "sql": [],
       "note": "订单表从 2025-11-02 开始，2025 年 1 月确实没有任何数据。这类题没有「合理外推」的余地——硬给数字就是编造。（原题是「预测 2027 年 1 月」，复核发现模型答得合格：给了区间、4 条局限、还建议等数据落地再复核。判据要求必须拒绝，属于过严，换成无数据的题更干净。）"
+    },
+    {
+      "id": "E01",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月的订单数相对 2026 年 9 月的环比增长率是多少？（按全部订单计，含已取消；单位百分比，保留一位小数）",
+      "sql": [
+        "WITH m AS (",
+        "  SELECT count(*) FILTER (WHERE ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01') AS oct,",
+        "         count(*) FILTER (WHERE ordered_at >= '2026-09-01' AND ordered_at < '2026-10-01') AS sep",
+        "    FROM orders)",
+        "SELECT round((oct::numeric / sep - 1) * 100, 1) AS v FROM m"
+      ],
+      "tolerance": 0.02,
+      "unit": "%",
+      "value": 25.5,
+      "note": "两步：先各月计数再算增长率。口径写死在题面（含已取消），考的是 SQL 不是猜口径。"
+    },
+    {
+      "id": "E02",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月订单金额（total_amount）的中位数是多少元？（排除已取消订单）",
+      "sql": [
+        "SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY total_amount))::bigint AS v",
+        "  FROM orders",
+        " WHERE status <> 'cancelled'",
+        "   AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 2700,
+      "note": "中位数不是平均值。用 avg() 会得到一个看起来合理的错数（这正是要抓的）。"
+    },
+    {
+      "id": "E03",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月下过单的客户里，此前（2026-10-01 之前）也下过非取消订单的客户占多少百分比？",
+      "sql": [
+        "WITH cur AS (",
+        "  SELECT DISTINCT customer_id FROM orders",
+        "   WHERE status <> 'cancelled'",
+        "     AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
+        "SELECT round(100.0 * count(*) FILTER (WHERE EXISTS (",
+        "         SELECT 1 FROM orders p",
+        "          WHERE p.customer_id = cur.customer_id AND p.status <> 'cancelled'",
+        "            AND p.ordered_at < '2026-10-01')) / count(*), 1) AS v",
+        "  FROM cur"
+      ],
+      "tolerance": 0.02,
+      "unit": "%",
+      "value": 79.2,
+      "note": "分母是「10 月下单的客户数」（去重），不是订单数——两个都算对才是老客占比。"
+    },
+    {
+      "id": "E04",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 6 月首次下单的客户（此前没有任何非取消订单）中，有多少人在 2026 年 9 月下过单？",
+      "sql": [
+        "WITH first_order AS (",
+        "  SELECT customer_id, min(ordered_at) AS first_at FROM orders",
+        "   WHERE status <> 'cancelled' GROUP BY 1),",
+        "cohort AS (",
+        "  SELECT customer_id FROM first_order",
+        "   WHERE first_at >= '2026-06-01' AND first_at < '2026-07-01')",
+        "SELECT count(*)::bigint AS v FROM cohort",
+        " WHERE EXISTS (SELECT 1 FROM orders o",
+        "                WHERE o.customer_id = cohort.customer_id",
+        "                  AND o.status <> 'cancelled'",
+        "                  AND o.ordered_at >= '2026-09-01' AND o.ordered_at < '2026-10-01')"
+      ],
+      "tolerance": 0.02,
+      "unit": "人",
+      "value": 55,
+      "note": "队列留存：先把「6 月首单」定出来（min(ordered_at) 落 6 月），再判 9 月是否活跃。先筛 6 月订单再判首单会算错。"
+    },
+    {
+      "id": "E05",
+      "cls": "E",
+      "mode": "value",
+      "question": "2025-11 到 2026-10 这一年里，销售额不到 1 万元的商品有多少款？（销售额按订单明细 subtotal，排除已取消订单）",
+      "sql": [
+        "WITH sold AS (",
+        "  SELECT pv.product_id AS pid, sum(oi.subtotal) AS amt",
+        "    FROM order_items oi",
+        "    JOIN orders o ON o.id = oi.order_id",
+        "    JOIN product_variants pv ON pv.id = oi.variant_id",
+        "   WHERE o.status <> 'cancelled'",
+        "     AND o.ordered_at >= '2025-11-01' AND o.ordered_at < '2026-11-01'",
+        "   GROUP BY 1)",
+        "SELECT count(*)::bigint AS v",
+        "  FROM products p LEFT JOIN sold s ON s.pid = p.id",
+        " WHERE COALESCE(s.amt, 0) < 10000"
+      ],
+      "tolerance": 0.02,
+      "unit": "款",
+      "value": 38,
+      "note": "反连接：从 products 出发 LEFT JOIN 汇总，没卖过的要算 0（用 INNER JOIN 会把它们整批漏掉）。"
+    },
+    {
+      "id": "E06",
+      "cls": "E",
+      "mode": "value",
+      "question": "「办公设备」（含其下所有子品类）2026 年 10 月的销售额是多少元？（按订单明细 subtotal，排除已取消订单）",
+      "sql": [
+        "SELECT round(sum(oi.subtotal))::bigint AS v",
+        "  FROM orders o",
+        "  JOIN order_items oi ON oi.order_id = o.id",
+        "  JOIN product_variants pv ON pv.id = oi.variant_id",
+        "  JOIN products p ON p.id = pv.product_id",
+        "  JOIN categories c ON c.id = p.category_id",
+        "  LEFT JOIN categories parent ON parent.id = c.parent_id",
+        " WHERE o.status <> 'cancelled'",
+        "   AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'",
+        "   AND COALESCE(parent.name, c.name) = '办公设备'"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 2781801,
+      "note": "两层品类：商品挂在子类（打印机/显示器/会议设备）上，父类才是「办公设备」。只按 c.name 过滤会得到 0。"
+    },
+    {
+      "id": "E07",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月的订单中，使用过优惠券的订单占了多大比例？（百分比，保留一位小数）",
+      "sql": [
+        "SELECT round(100.0 * count(*) FILTER (WHERE EXISTS (",
+        "         SELECT 1 FROM coupon_redemptions r WHERE r.order_id = o.id)) / count(*), 1) AS v",
+        "  FROM orders o",
+        " WHERE o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'"
+      ],
+      "tolerance": 0.02,
+      "unit": "%",
+      "value": 14,
+      "note": "分母是订单数。如果拿「核销记录数 ÷ 订单数」会算错——一张券对应一单，但同一单可能核销多张（本题数据里没有，仍要按订单去重才对）。"
+    },
+    {
+      "id": "E08",
+      "cls": "E",
+      "mode": "value",
+      "question": "2025-11 到 2026-10 这一年，按商品汇总销售额（订单明细 subtotal，排除已取消）后，销售额前 10 名的商品合计占全部的百分比是多少？（保留一位小数）",
+      "sql": [
+        "WITH per_product AS (",
+        "  SELECT p.id, sum(oi.subtotal) AS amt",
+        "    FROM orders o",
+        "    JOIN order_items oi ON oi.order_id = o.id",
+        "    JOIN product_variants pv ON pv.id = oi.variant_id",
+        "    JOIN products p ON p.id = pv.product_id",
+        "   WHERE o.status <> 'cancelled'",
+        "     AND o.ordered_at >= '2025-11-01' AND o.ordered_at < '2026-11-01'",
+        "   GROUP BY p.id),",
+        "ranked AS (SELECT amt, row_number() OVER (ORDER BY amt DESC) AS rn FROM per_product)",
+        "SELECT round(100.0 * sum(amt) FILTER (WHERE rn <= 10) / sum(amt), 1) AS v FROM ranked"
+      ],
+      "tolerance": 0.03,
+      "unit": "%",
+      "value": 7.9,
+      "note": "两处易错：① 按商品（products）汇总，不是按 SKU（variants）；② 分母必须是全部，不是前 10 名。"
+    },
+    {
+      "id": "E09",
+      "cls": "E",
+      "mode": "value",
+      "question": "2025-11 到 2026-10 这 12 个月里，退款金额最高的那个月，退款金额合计是多少元？（按退款申请时间归月）",
+      "sql": [
+        "SELECT round(max(sub.amt))::bigint AS v FROM (",
+        "  SELECT to_char(requested_at, 'YYYY-MM') AS m, sum(refund_amount) AS amt",
+        "    FROM returns",
+        "   WHERE requested_at >= '2025-11-01' AND requested_at < '2026-11-01'",
+        "   GROUP BY 1) sub"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 239835,
+      "note": "先按月汇总再取最大，不是「取最大单笔退款」。时间窗必须自己加：库里有 2026-11 的退款记录（超出 12 个月窗口）。"
+    },
+    {
+      "id": "E10",
+      "cls": "E",
+      "mode": "refuse",
+      "question": "2026 年 10 月的 GMV 同比去年同期增长了多少百分比？",
+      "tolerance": 0.01,
+      "unit": "%",
+      "value": null,
+      "note": "数据从 2025-11-02 开始，没有 2025 年 10 月 —— 同比算不出来。正确答案是说清数据窗口，不是给一个数。"
+    },
+    {
+      "id": "E11",
+      "cls": "E",
+      "mode": "value",
+      "question": "按账单周期起始月统计，2026 年 9 月状态为 paid 的账单金额合计是多少元？",
+      "sql": [
+        "SELECT round(sum(amount))::bigint AS v FROM invoices",
+        " WHERE status = 'paid'",
+        "   AND period_start >= '2026-09-01' AND period_start < '2026-10-01'"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 6667458,
+      "note": "时间口径在题面：按 period_start 而非 issued_at。银行到账与开票日期不同月，选错列数字差一个月的量。"
+    },
+    {
+      "id": "E12",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年全年，订阅席位变更记录里 delta 的合计是多少？（单位：个，净增为正）",
+      "sql": [
+        "SELECT sum(delta)::bigint AS v FROM subscription_seat_changes",
+        " WHERE changed_at >= '2026-01-01' AND changed_at < '2027-01-01'"
+      ],
+      "tolerance": 0.01,
+      "unit": "个",
+      "value": 6056,
+      "note": "delta 有正有负，直接 sum。改用 count(*) 或 sum(seats_after) 都是另一个数。"
+    },
+    {
+      "id": "E13",
+      "cls": "E",
+      "mode": "value",
+      "question": "注册时间早于 2025-11-01、且至今没有任何订单（任何状态的订单都算下过单）的客户有多少人？",
+      "sql": [
+        "SELECT count(*)::bigint AS v FROM customers c",
+        " WHERE c.signed_up_at < '2025-11-01'",
+        "   AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)"
+      ],
+      "tolerance": 0.02,
+      "unit": "人",
+      "value": 5449,
+      "note": "「任何状态都算下过单」写进题面，所以不能加 status <> 'cancelled' —— 加了会把只下过取消单的人多算成沉默客户。"
+    },
+    {
+      "id": "E14",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月，平均客单价（非取消订单的实收合计 ÷ 订单数）最高的获客渠道，其客单价是多少元？",
+      "sql": [
+        "SELECT round(sum(o.total_amount - o.discount_amount) / count(*))::bigint AS v",
+        "  FROM orders o JOIN channels ch ON ch.id = o.channel_id",
+        " WHERE o.status <> 'cancelled'",
+        "   AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'",
+        " GROUP BY ch.name ORDER BY 1 DESC LIMIT 1"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 3996,
+      "note": "B02 问的是成交额最高（总量），这里问客单价（均值）——排序对象不同，冠军往往不是同一个渠道。"
+    },
+    {
+      "id": "E15",
+      "cls": "E",
+      "mode": "all",
+      "question": "2026 年 10 月，客户在 2026-10-01 之前没有任何非取消订单（即这批单子是他们的首批）时，这些客户在 10 月下了多少单？此前（2026-10-01 之前）已经有过非取消订单的客户，10 月又下了多少单？（两个数都要给）",
+      "sql": [
+        "WITH first_order AS (",
+        "  SELECT customer_id, min(ordered_at) AS first_at FROM orders",
+        "   WHERE status <> 'cancelled' GROUP BY 1)",
+        "SELECT count(*) FILTER (WHERE f.first_at >= '2026-10-01')::bigint AS new_orders,",
+        "       count(*) FILTER (WHERE f.first_at <  '2026-10-01')::bigint AS old_orders",
+        "  FROM orders o JOIN first_order f ON f.customer_id = o.customer_id",
+        " WHERE o.status <> 'cancelled'",
+        "   AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'"
+      ],
+      "tolerance": 0.01,
+      "unit": "单",
+      "values": [
+        239,
+        962
+      ],
+      "note": "两个数都要对（mode=all）。第一版题面写「首次下单客户（此前没有任何非取消订单）」，「此前」没锚定是相对月初还是相对该笔订单——模型按「该单之前」读，得到 227/974，同样成立（一个新客同月下两单，第二单就变成老客）。题面改成锚定 2026-10-01 后才无歧义。自检等式：两项之和 = 10 月非取消订单数 1201。"
+    },
+    {
+      "id": "E16",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月，退货件数占售出件数的百分比是多少？（售出按订单明细 quantity，退货按退款申请时间在 10 月的退货件数）",
+      "sql": [
+        "WITH sold AS (",
+        "  SELECT sum(oi.quantity) AS qty FROM orders o",
+        "    JOIN order_items oi ON oi.order_id = o.id",
+        "   WHERE o.status <> 'cancelled'",
+        "     AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'),",
+        "ret AS (",
+        "  SELECT sum(r.quantity) AS qty FROM returns r",
+        "   WHERE r.requested_at >= '2026-10-01' AND r.requested_at < '2026-11-01')",
+        "SELECT round(100.0 * ret.qty / sold.qty, 2) AS v FROM sold, ret"
+      ],
+      "tolerance": 0.03,
+      "unit": "%",
+      "value": 3.33,
+      "note": "三个粒度：件（quantity）、单（order_id）、人（customer_id）。退货率按件算和按单算差一倍以上。"
+    },
+    {
+      "id": "E17",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月下过单的客户里，当月下了 2 笔及以上非取消订单的客户有多少人？",
+      "sql": [
+        "SELECT count(*)::bigint AS v FROM (",
+        "  SELECT customer_id FROM orders",
+        "   WHERE status <> 'cancelled'",
+        "     AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'",
+        "   GROUP BY 1 HAVING count(*) >= 2) sub"
+      ],
+      "tolerance": 0.02,
+      "unit": "人",
+      "value": 104,
+      "note": "HAVING 而不是 WHERE：先按客户分组，再筛组内单数。"
+    },
+    {
+      "id": "E18",
+      "cls": "E",
+      "mode": "value",
+      "question": "2026 年 10 月，平均每笔非取消订单包含多少件商品（订单明细 quantity 合计 ÷ 订单数，保留两位小数）？",
+      "sql": [
+        "SELECT round(1.0 * sum(oi.quantity) / count(DISTINCT o.id), 2) AS v",
+        "  FROM orders o JOIN order_items oi ON oi.order_id = o.id",
+        " WHERE o.status <> 'cancelled'",
+        "   AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'"
+      ],
+      "tolerance": 0.02,
+      "unit": "件",
+      "value": 2.6,
+      "note": "分母要用 count(DISTINCT o.id)：join 明细后直接 count(*) 得到的是明细行数，不是订单数。"
     }
   ]
 }
