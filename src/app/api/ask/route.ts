@@ -19,12 +19,29 @@ import {
 
 import { createDataAgent } from '@/lib/agent';
 import { streamAgentTurn } from '@/lib/agent-stream';
+import { clientIp, getAskRateLimiter } from '@/lib/rate-limit';
 import { newSessionId, readSessionId, serializeSessionCookie } from '@/lib/session-cookie';
 
 /** Agent 循环可能要跑十几秒（多次 SQL），给足函数执行时间。 */
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
+  /**
+   * 每 IP 每小时提问上限（第二道防线，第一道是 proxy 的口令门）。
+   *
+   * 计在**入口**而不是模型调用前：一轮问答可能触发十几次模型调用，
+   * 按调用计数会让阈值和"用户体感"完全脱节 —— 用户只知道"我问了几个问题"。
+   */
+  const hit = getAskRateLimiter().check(clientIp(req.headers));
+  if (!hit.ok) {
+    return Response.json(
+      {
+        error: `提问太频繁：每 IP 每小时最多 ${hit.limit} 次，请 ${hit.retryAfterSec} 秒后再试。`,
+      },
+      { status: 429, headers: { 'retry-after': String(hit.retryAfterSec) } },
+    );
+  }
+
   const { messages }: { messages: UIMessage[] } = await req.json();
 
   if (!Array.isArray(messages) || messages.length === 0) {

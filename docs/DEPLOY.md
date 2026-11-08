@@ -49,23 +49,46 @@ AGENT_DATABASE_URL=  # 只读账号，必须
 LLM_API_KEY=
 LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-flash
+DEMO_PASSCODE=       # 访问口令，不配 → 生产环境 503（见第 3 节）
+ASK_RATE_LIMIT_PER_HOUR=20  # 可选
 ```
 
 不加 `HTTPS_PROXY`（那是本机翻墙用的，线上不需要）。
 
 ---
 
-## 3. 访问控制（上线前必须做，否则别公开）
+## 3. 访问控制（已实现，2026-11-08）
 
 这个 demo 每问一次要烧 1.5-4 万 token。地址一旦被爬虫或路人发现，余额按小时计往下掉。
+所以两层都上了（`docs/ACCEPTANCE-W3.md` 第 13 节）：
 
-**W3 没实现这块**（拍板：先本地验证，11/26 一起做）。上线前选一种：
-
-| 方案 | 实现 | 挡住谁 |
+| 层 | 代码 | 能挡谁 |
 |---|---|---|
-| 口令门（推荐，最省事） | 中间件校验 `DEMO_PASSCODE`，前端一个输入框 | 爬虫 + 路人；挡不住分享口令 |
-| IP 级限流 | 内存计数（单实例够用） | 刷接口的；多实例失效 |
-| 两者都上 | 口令门 + 每 IP 每小时 20 次 | 基本够用 |
+| 口令门 | `src/proxy.ts` + `src/app/unlock/` | 爬虫、路人、搜索引擎 |
+| 每 IP 限流 | `src/lib/rate-limit.ts`，拦在 `/api/ask` 入口 | 拿到口令后刷接口的 |
+
+### 要配的两个环境变量
+
+```
+DEMO_PASSCODE=给面试官的那句口令       # 不配 → 生产环境 503（fail-closed），不是放行
+ASK_RATE_LIMIT_PER_HOUR=20             # 可选，默认 20
+```
+
+`DEMO_PASSCODE` 只存在服务端，浏览器拿到的是它的 sha256（httpOnly cookie，30 天）。
+**换了口令，所有人的 cookie 立刻失效** —— 口令是分享出去的东西，要能一键踢掉。
+
+### 上线前自测三条
+
+1. 无 cookie 打开首页 → 跳到 `/unlock`；输错口令 → 停在原地并提示（输入不被清空）
+2. 输对 → 回到原来要去的页面；cookie 里是 64 位十六进制，**不是明文口令**
+3. 连问 21 次 → 第 21 次返回 429 且带 `retry-after`
+
+### 已知限制（写在代码里，不只写在这）
+
+限流是**进程内存**计数。Netlify Functions 每个实例独立，同一 IP 落到不同实例时各自从 0 开始，
+实际阈值会放大到「实例数 × 20」。要跨实例精确，必须把计数放进数据库
+（原子 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`）——`rate-limit.ts` 的 `storage`
+已经留成可注入，属于 W4。
 
 **别用"只在前端隐藏按钮"这种方法** —— 接口还开着，等于没做。
 
