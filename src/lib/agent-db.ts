@@ -17,6 +17,8 @@
 
 import pg from 'pg';
 
+import { NUMERIC_TYPE_OIDS } from './column-totals';
+
 const { Pool } = pg;
 
 /** 单次查询最多返回行数。超过就截断并告知模型（让它自己加聚合或过滤）。 */
@@ -93,6 +95,13 @@ function hasMultipleStatements(sql: string): boolean {
 
 export type QueryResult = {
   columns: string[];
+  /**
+   * 数据库告知是数值类型的列（来自 `result.fields[].dataTypeID`，不是猜的）。
+   *
+   * 存在的理由：给模型算「列合计」时不能靠值长什么样判断 —— `String` 列里全是
+   * 数字和 `numeric` 列在 JS 里长得一模一样。类型的唯一可信来源是数据库自己。
+   */
+  numericColumns: string[];
   /** 行数据，已转成 JSON 安全的值（Date → ISO 字符串，BigInt → number/string）。 */
   rows: Record<string, unknown>[];
   /** 实际返回行数（截断后）。 */
@@ -177,6 +186,9 @@ export async function runReadOnlyQuery(sql: string): Promise<QueryResult> {
 
     return {
       columns: result.fields.map((f) => f.name),
+      numericColumns: result.fields
+        .filter((f) => NUMERIC_TYPE_OIDS.has(f.dataTypeID))
+        .map((f) => f.name),
       rows,
       rowCount: rows.length,
       truncated,

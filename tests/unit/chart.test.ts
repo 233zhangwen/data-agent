@@ -8,7 +8,15 @@ function makeResult(
   rows: Record<string, unknown>[],
   extra: Partial<QueryResult> = {},
 ): QueryResult {
-  return { columns, rows, rowCount: rows.length, truncated: false, elapsedMs: 5, ...extra };
+  return {
+    columns,
+    numericColumns: [],
+    rows,
+    rowCount: rows.length,
+    truncated: false,
+    elapsedMs: 5,
+    ...extra,
+  };
 }
 
 const salesByMonth = makeResult(

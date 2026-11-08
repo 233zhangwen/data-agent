@@ -28,6 +28,7 @@ import {
 import PROMPT from './agent-prompt.json';
 import { CALC_DESCRIPTION, calculate, type CalcOp } from './calc';
 import { buildChartSpec, chartErrorForModel, type ChartSpec } from './chart';
+import { columnTotals } from './column-totals';
 import {
   createLoopGuard,
   L2_SAME_ERROR_AT,
@@ -106,7 +107,7 @@ export function getChatModel(thinking: 'disabled' | 'enabled' = 'disabled') {
  *   · null 显式写成 `NULL`，不写成空 —— 空字符串和"没有值"在统计上完全不同。
  *   · 数字不加千分位 —— 加了模型算 subtraction 时会出错。
  */
-function formatForModel(r: QueryResult): string {
+export function formatForModel(r: QueryResult): string {
   if (!r.rows.length) {
     return '查询成功，但返回 0 行。可能是筛选条件过严，或者这段时间确实没有数据。';
   }
@@ -123,6 +124,28 @@ function formatForModel(r: QueryResult): string {
       '| ' + r.columns.map((c) => (row[c] === null ? 'NULL' : String(row[c]))).join(' | ') + ' |',
     ),
   ];
+
+  /**
+   * 服务端算好的列合计。
+   *
+   * 为什么由服务端算、而不是再给模型一个「核对」工具：D07 那类错误的现场是
+   * 「明细逐行都对、合计加错」，而 verify_sum 这类自检工具在 313 次运行里
+   * 一次都没被调用过 —— 模型不会主动怀疑自己算错。把合计直接放进结果里，
+   * 它要做的是抄一个数，不是加六个数。详情见 column-totals.ts 顶部。
+   *
+   * 措辞上必须点明"服务端精确相加"和"覆盖全部行"，否则结果被截断时模型会把
+   * 上表 50 行加起来去核对，发现对不上就怀疑合计算错了。
+   */
+  // truncated 必须传：截断的结果加起来不是全表合计，那种"看起来权威的错数"比没有更坏
+  const totals = columnTotals(r.columns, r.numericColumns, r.rows, { truncated: r.truncated });
+  if (totals.length) {
+    lines.push(
+      '',
+      `列合计（服务端精确相加，覆盖全部 ${r.rowCount} 行${r.rows.length > shown.length ? '，不只是上表' : ''}；` +
+        '只对本身可相加的列有意义 —— 比率、均值、占比列不要引用）：',
+      ...totals.map((t) => `- ${t.column} 合计 = ${t.text}（${t.count} 行参与）`),
+    );
+  }
 
   if (r.rows.length > shown.length) {
     lines.push('', `（只显示前 ${shown.length} 行。需要完整数据请加聚合或筛选。）`);
@@ -342,7 +365,6 @@ function makeTools(
       op: CalcOp;
       values?: (number | string)[];
       fromLastQuery?: { column: string };
-      expected?: number | string;
       decimals?: number;
       unit?: string;
     }>({
@@ -350,13 +372,13 @@ function makeTools(
       properties: {
         op: {
           type: 'string',
-          enum: ['sum', 'avg', 'diff', 'product', 'ratio', 'pct_change', 'verify_sum'],
+          enum: ['sum', 'avg', 'diff', 'product', 'ratio', 'pct_change'],
           description: '运算类型',
         },
         values: {
           type: 'array',
           items: { oneOf: [{ type: 'number' }, { type: 'string' }] },
-          description: '参与运算的数（纯数字，不要带单位）；verify_sum 时是分项',
+          description: '参与运算的数（纯数字，不要带单位）',
         },
         fromLastQuery: {
           type: 'object',
@@ -366,7 +388,6 @@ function makeTools(
             '从最近一次 runSql 的**完整结果**里取这一列作为 values（优先于 values）。' +
             '要算一整列的和/平均时用它，比手抄数字可靠。',
         },
-        expected: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '仅 verify_sum：你给出的合计' },
         decimals: { type: 'number', description: '保留几位小数，默认 2' },
         unit: { type: 'string', description: '仅用于展示，如「万元」「%」「人」' },
       },
@@ -378,7 +399,6 @@ function makeTools(
         op: CalcOp;
         values?: (number | string)[];
         fromLastQuery?: { column: string };
-        expected?: number | string;
         decimals?: number;
         unit?: string;
       }) => {
@@ -409,13 +429,7 @@ function makeTools(
           return '没有可计算的数：请给 values，或用 fromLastQuery 指定列名。';
         }
 
-        const r = calculate({
-          op: p.op,
-          values,
-          expected: p.expected,
-          decimals: p.decimals,
-          unit: p.unit,
-        });
+        const r = calculate({ op: p.op, values, decimals: p.decimals, unit: p.unit });
         return r.ok ? `${r.display}${sourceNote}\n${r.detail}` : `计算失败：${r.error}`;
       },
     ),

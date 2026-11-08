@@ -13,7 +13,11 @@
  *
  * 两个职责：
  *   1. compute —— 由分项算合计 / 差额 / 比率，替代心算
- *   2. verify  —— 核对自己已经给出的合计与分项是否一致，收口前自检
+ *
+ * ⚠️ 曾经的第三个职责 `verify_sum`（把你给的合计与分项之和比对）**已删除**
+ * （2026-11-08）：313 次真实运行里一次都没被调用。原因不是它没用，而是它需要
+ * 模型先想到"我可能算错了"——它想不到。自检要么自动生效，要么别叫自检。
+ * 现在合计由 `runSql` 的结果自带（column-totals.ts），模型只需要抄。
  *
  * 为什么用 BigInt 定点而不是 Number：0.1 + 0.2 那类误差在金额场景会以"差一分钱"
  * 的形式出现在报告里，事后极难归因。定点整数运算是可解释的 —— 每个数字都能
@@ -22,14 +26,12 @@
  * 纯函数，无 IO，可单测（tests/unit/calc.test.ts）。
  */
 
-export type CalcOp = 'sum' | 'diff' | 'product' | 'ratio' | 'pct_change' | 'avg' | 'verify_sum';
+export type CalcOp = 'sum' | 'diff' | 'product' | 'ratio' | 'pct_change' | 'avg';
 
 export type CalcInput = {
   op: CalcOp;
-  /** 参与运算的数（verify_sum 时是分项）。允许字符串，会去掉千分位逗号和空格。 */
+  /** 参与运算的数。允许字符串，会去掉千分位逗号和空格。 */
   values: (number | string)[];
-  /** 仅 verify_sum：模型给出的合计，用于比对。 */
-  expected?: number | string;
   /** 结果保留几位小数，默认 2。 */
   decimals?: number;
   /** 仅用于展示文案，如「万元」「%」「人」。不参与运算。 */
@@ -217,41 +219,6 @@ export function calculate(input: CalcInput): CalcResult {
         };
       }
 
-      case 'verify_sum': {
-        if (input.expected === undefined || input.expected === null) {
-          return { ok: false, error: 'verify_sum 需要 expected（你给出的合计）' };
-        }
-        const total = sumAll(values);
-        const expected = toScaled(input.expected);
-        const [a, b, s] = align(total, expected);
-        const gapScaled = { n: a - b, s };
-        const gap = finish(gapScaled, decimals);
-        const sum = finish(total, decimals);
-        const exp = finish(expected, decimals);
-
-        if (b === BigInt(0)) {
-          return { ok: true, value: sum, display: `${fmt(sum, decimals)}${unit}`, detail: `分项之和 ${fmt(sum, decimals)}${unit}` };
-        }
-
-        if (gapScaled.n === BigInt(0)) {
-          return {
-            ok: true,
-            value: sum,
-            display: `${fmt(sum, decimals)}${unit}`,
-            detail: `一致：分项之和 = 你给的合计 = ${fmt(sum, decimals)}${unit}`,
-          };
-        }
-
-        const pct = finish(divScaled(gapScaled, expected, decimals + 6), decimals + 1);
-        return {
-          ok: false,
-          error:
-            `**不一致**：分项之和 ${fmt(sum, decimals)}${unit}，你给的合计 ${fmt(exp, decimals)}${unit}，` +
-            `差 ${fmt(gap, decimals)}${unit}（占 ${fmt(pct, decimals + 1)}%）。` +
-            `请以分项之和为准；如果你确信合计对，说明有分项漏了或多算了，回去核对分项。`,
-        };
-      }
-
       default: {
         const never: never = input.op;
         return { ok: false, error: `不支持的 op：${String(never)}` };
@@ -268,7 +235,8 @@ export function calculate(input: CalcInput): CalcResult {
  */
 export const CALC_DESCRIPTION =
   '做精确的十进制算术，替代心算。op 可选：sum（求和）/ avg（平均）/ diff（第一个减其余）/ ' +
-  'product（连乘）/ ratio（前÷后）/ pct_change（本期对基期的百分比变化）/ ' +
-  'verify_sum（把分项之和与你给出的合计比对）。' +
+  'product（连乘）/ ratio（前÷后）/ pct_change（本期对基期的百分比变化）。' +
   '**凡是需要把多个已查出的数字合并成一个数，都用它算，不要自己心算** —— ' +
-  '多位数加法会算错的。能由 SQL 聚合直接得出的，优先在 SQL 里算，不要拆成明细再相加。';
+  '多位数加法会算错的。注意：runSql 的结果里已经附了各数值列的「列合计」，' +
+  '需要整列合计时直接引用那个数，不要再用这个工具重算一遍；' +
+  '这个工具用于结果里没有现成答案的情形（差额、占比、增长率、跨两次查询合并）。';

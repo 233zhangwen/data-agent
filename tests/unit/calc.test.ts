@@ -6,8 +6,11 @@ import { calculate, toScaled } from '@/lib/calc';
  * 这个模块的存在理由是 D07：模型心算 6 个数字的和，算错了 15.7 万。
  * 所以测试的重点不是"加减乘除对不对"（那是 BigInt 的事），而是：
  *   1. 金额场景常见的误差（0.1+0.2、浮点尾数）必须精确
- *   2. verify_sum 必须能当场判出"分项之和 ≠ 你给的合计"
- *   3. 输入不合法时报错，而不是猜（模型传 "198.4万" 时不能静默当 198.4）
+ *   2. 输入不合法时报错，而不是猜（模型传 "198.4万" 时不能静默当 198.4）
+ *
+ * 原来的第 3 条测的是 `verify_sum`（自检工具）。它已删除 —— 313 次运行 0 调用，
+ * 自检改成"结果自带列合计"（column-totals.ts），D07 的回归用例搬到了
+ * tests/unit/column-totals.test.ts。
  */
 
 describe('toScaled：解析', () => {
@@ -94,37 +97,5 @@ describe('diff / avg / ratio / pct_change', () => {
   it('参数个数不对时明确报错', () => {
     expect(calculate({ op: 'ratio', values: [1, 2, 3] }).ok).toBe(false);
     expect(calculate({ op: 'pct_change', values: [1] }).ok).toBe(false);
-  });
-});
-
-describe('verify_sum：收口自检（这一节是 D07 的正解）', () => {
-  const parts = [198.4, 107.0, 107.1, 64.0, 43.5, 27.9];
-
-  it('一致时返回 ok 且说"一致"', () => {
-    const r = calculate({ op: 'verify_sum', values: parts, expected: 547.9, decimals: 1, unit: '万元' });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.detail).toContain('一致');
-  });
-
-  it('D07 真实场景：模型写 563.6，分项和 547.9 —— 必须判不一致并说清差多少', () => {
-    const r = calculate({ op: 'verify_sum', values: parts, expected: 563.6, decimals: 1, unit: '万' });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error).toContain('不一致');
-    expect(r.error).toContain('547.9');
-    expect(r.error).toContain('563.6');
-    expect(r.error).toContain('15.7');
-  });
-
-  it('缺 expected 时报错，不静默通过', () => {
-    const r = calculate({ op: 'verify_sum', values: parts });
-    expect(r.ok).toBe(false);
-  });
-
-  it('差一分钱也算不一致（金额场景不做模糊容忍）', () => {
-    const r = calculate({ op: 'verify_sum', values: [10.01, 20.01], expected: 30.02, decimals: 2 });
-    expect(r.ok).toBe(true); // 30.02 恰好相等
-    const r2 = calculate({ op: 'verify_sum', values: [10.01, 20.01], expected: 30.03, decimals: 2 });
-    expect(r2.ok).toBe(false);
   });
 });
