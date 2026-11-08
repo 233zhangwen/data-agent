@@ -21,3 +21,4 @@
 /tsconfig.tsbuildinfo
 /test-results/
 /playwright-report/
+.build-probe/
