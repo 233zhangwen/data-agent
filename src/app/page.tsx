@@ -2,7 +2,7 @@ import { AskPanel } from './AskPanel';
 
 export default function Home() {
   return (
-    <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 px-6 py-10">
+    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-6 py-10">
       <header className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold">数据问答 Agent</h1>
         <p className="text-sm text-zinc-500">
