@@ -17,7 +17,10 @@
     "test:all": "vitest run tests",
     "eval:recall": "vitest run eval/schema-recall.eval.ts",
     "eval:repair": "vitest run eval/repair.eval.ts",
-    "eval:thinking": "vitest run eval/thinking.eval.ts"
+    "eval:thinking": "vitest run eval/thinking.eval.ts",
+    "eval:qa": "vitest run eval/qa.eval.ts",
+    "eval:check": "node --experimental-transform-types eval/check-qa-set.mts",
+    "test:e2e": "vitest run tests/e2e"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.109",
