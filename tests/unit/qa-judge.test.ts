@@ -236,3 +236,28 @@ describe('judgeAnswer · interpretations', () => {
     expect(no.hit).toBe(false);
   });
 });
+
+describe('all 模式（多问一题，全部要对）', () => {
+  it('全部命中才算对', () => {
+    const v = judgeAnswer({ mode: 'all', values: [239, 962] }, '新客 239 笔，老客 962 笔。');
+    expect(v.hit).toBe(true);
+    expect(v.detail).toContain('全部命中');
+  });
+
+  it('缺一个就不算对', () => {
+    const v = judgeAnswer({ mode: 'all', values: [239, 962] }, '共 239 笔新客订单。');
+    expect(v.hit).toBe(false);
+    expect(v.detail).toContain('缺 1 项');
+  });
+
+  it('空 values 直接抛错，不静默恒真', () => {
+    expect(() => judgeAnswer({ mode: 'all', values: [] }, '239')).toThrow();
+  });
+
+  it('与 series 的区别：5 个值缺 1 个，series 放行、all 不放行', () => {
+    const answer = '1 万、2 万、3 万、4 万';
+    const values = [10000, 20000, 30000, 40000, 50000];
+    expect(judgeAnswer({ mode: 'series', values }, answer).hit).toBe(true);
+    expect(judgeAnswer({ mode: 'all', values }, answer).hit).toBe(false);
+  });
+});

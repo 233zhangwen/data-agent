@@ -96,7 +96,7 @@ export type Interpretation = {
 };
 
 export type JudgeInput = {
-  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
+  mode: 'value' | 'all' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
   value?: number | null;
   values?: number[] | null;
   altValues?: (number | null | undefined)[];
@@ -118,7 +118,8 @@ export type JudgeOutput = {
 /**
  * 判一条答案。
  * - value/caveat：主值或任一备选口径命中 → hit；caveat 另判关键词
- * - series：参考值集合覆盖 ≥80% → hit
+ * - all：参考值**全部**命中 → hit（多问一题、每个数都要对）
+ * - series：参考值集合覆盖 ≥80% → hit（月度序列容忍个别项缺失）
  * - refuse：说明无法计算（W3 起不再因附录数字判编造，那会误伤正确拒答）
  * - qualitative：只判统计陷阱有没有被点出
  * - interpretations：命中任一可接受口径 → hit；caveatOk 判「解释是否与命中的口径一致」
@@ -146,6 +147,21 @@ export function judgeAnswer(input: JudgeInput, answer: string): JudgeOutput {
       caveatOk: null,
       expected: '（应主动指出样本量 / 口径限制）',
       detail: said ? '已指出统计限制' : '未指出统计限制',
+    };
+  }
+
+  // 「一题多问」类：题目要求给出好几个数（如新客订单数与老客订单数），
+  // 只要有一个不对就是没答对。series 的 ≥80% 覆盖在这里不适用 —— 2 个值缺 1 个只剩 50%，
+  // 5 个值缺 1 个却是 80%，恰好放行，这个阈值本来是为 12 个月的序列设的。
+  if (input.mode === 'all') {
+    const expected = input.values ?? [];
+    if (expected.length === 0) throw new Error('all 模式至少需要一个参考值，否则恒真');
+    const missed = expected.filter((v) => matchesReference(answer, nums, v, tol, input.unit) === null);
+    return {
+      hit: missed.length === 0,
+      caveatOk: null,
+      expected: expected.map((v) => `${v}${input.unit ? ' ' + input.unit : ''}`).join(' + '),
+      detail: missed.length === 0 ? `全部命中（${expected.length} 项）` : `缺 ${missed.length} 项：${missed.join(', ')}`,
     };
   }
 

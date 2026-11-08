@@ -25,3 +25,6 @@
 
 # 评测运行产物（每次重跑都变，不入库）
 /eval/results/empty-answer.txt
+
+# 子集评测产物（QA_ONLY 用，不是一轮完整评测）
+/eval/results/qa-subset.json

@@ -21,8 +21,8 @@ type Alt = { sql: string[]; note: string; value?: number | null };
 type Interp = { label: string; keywords?: string[]; sql: string[]; value?: number | null };
 type Case = {
   id: string;
-  cls: 'A' | 'B' | 'C' | 'D';
-  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
+  cls: 'A' | 'B' | 'C' | 'D' | 'E';
+  mode: 'value' | 'all' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
   question: string;
   sql?: string[];
   alts?: Alt[];
@@ -98,6 +98,14 @@ for (const c of set.cases) {
     if (c.mode === 'series') {
       const r = await client.query(mainSql);
       computed = r.rows.map((row) => Number(Object.values(row)[Object.keys(row).length - 1]));
+    } else if (c.mode === 'all') {
+      // 一行多列：每个列就是一个必答值（题目多问），顺序即列顺序
+      const r = await client.query(mainSql);
+      if (!r.rows.length) throw new Error('all 模式的 SQL 没有返回行');
+      computed = Object.values(r.rows[0]).map((x) => Number(x));
+      if (computed.length !== (c.values ?? []).length && (c.values ?? []).length !== 0) {
+        console.log(`   ⚠ ${c.id} 列数 ${computed.length} 与 JSON 里 ${(c.values ?? []).length} 个值对不上`);
+      }
     } else {
       const r = await client.query(mainSql);
       computed = r.rows.length ? Number(Object.values(r.rows[0])[0]) : null;
@@ -125,7 +133,7 @@ for (const c of set.cases) {
 
   const fmt = (v: number | number[] | null) => (Array.isArray(v) ? `[${v.join(', ')}]` : String(v));
 
-  if (c.mode === 'series') {
+  if (c.mode === 'series' || c.mode === 'all') {
     const prev = c.values ?? null;
     const same = prev && computed && prev.length === (computed as number[]).length
       && prev.every((v, i) => v === (computed as number[])[i]);

@@ -12,8 +12,8 @@ export type Alt = { sql: string[]; note: string; value?: number | null };
 
 export type EvalCase = {
   id: string;
-  cls: 'A' | 'B' | 'C' | 'D';
-  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
+  cls: 'A' | 'B' | 'C' | 'D' | 'E';
+  mode: 'value' | 'all' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
   question: string;
   sql?: string[];
   alts?: Alt[];

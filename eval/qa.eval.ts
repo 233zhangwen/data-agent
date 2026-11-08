@@ -17,6 +17,19 @@ import { toJudgeInput, type EvalCase } from './judge-input';
 
 const SET = JSON.parse(fs.readFileSync('eval/qa-set.json', 'utf8')) as { meta: unknown; cases: EvalCase[] };
 
+/**
+ * 只跑一部分题：`QA_ONLY=E` 或 `QA_ONLY=E01,E15`。
+ *
+ * 用途：加新题时先只看新题的表现——跑一遍 55 条要约 10 分钟、2 块钱，
+ * 而"这道新题是不是太难"只需要 15 条就能看出来。子集结果写到 qa-subset.json，
+ * 文件名和 `subset` 字段都在提醒：**它不是一轮完整评测，不能拿去比准确率**。
+ */
+const ONLY = (process.env.QA_ONLY ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+const CASES = ONLY.length
+  ? SET.cases.filter((c) => ONLY.some((k) => c.id === k || c.cls === k))
+  : SET.cases;
+const OUT_FILE = ONLY.length ? 'eval/results/qa-subset.json' : 'eval/results/qa.json';
+
 // ------------------------------------------------------------------ 判定
 
 type Verdict = {
@@ -61,11 +74,13 @@ function judge(c: EvalCase, r: TurnResult): Verdict {
 
 // ------------------------------------------------------------------ 跑
 
-describe('W3 C17 · 40 条标注评测集', () => {
+describe(`W3 C17 · ${CASES.length} 条标注评测集`, () => {
   it('全量跑 + 五项指标', { timeout: 30 * 60 * 1000 }, async () => {
     const verdicts: Verdict[] = [];
 
-    for (const c of SET.cases) {
+    if (ONLY.length) console.log(`子集运行：${CASES.map((c) => c.id).join(', ')}\n`);
+
+    for (const c of CASES) {
       const started = Date.now();
       const r = await runTurn(c.question);
       const v = judge(c, r);
@@ -134,10 +149,14 @@ describe('W3 C17 · 40 条标注评测集', () => {
 
     fs.mkdirSync('eval/results', { recursive: true });
     fs.writeFileSync(
-      'eval/results/qa.json',
-      JSON.stringify({ ranAt: new Date().toISOString(), metrics, byClass, verdicts, unmatched }, null, 2),
+      OUT_FILE,
+      JSON.stringify(
+        { ranAt: new Date().toISOString(), subset: ONLY.length ? ONLY : null, metrics, byClass, verdicts, unmatched },
+        null,
+        2,
+      ),
       'utf8',
     );
-    console.log('\n结果已写入 eval/results/qa.json');
+    console.log(`\n结果已写入 ${OUT_FILE}${ONLY.length ? '（子集，别拿去比准确率）' : ''}`);
   });
 });
