@@ -47,6 +47,8 @@ type Verdict = {
   steps: number;
   /** 是否走了兜底收口（步数用尽后补的那一次调用）。 */
   wrappedUp: boolean;
+  /** 这一轮实际调过的工具名，按调用顺序。用来回答「它到底有没有用 calc」。 */
+  toolsUsed: string[];
   tokens: number;
   firstTokenMs: number | null;
   elapsedMs: number;
@@ -66,6 +68,7 @@ function judge(c: EvalCase, r: TurnResult): Verdict {
     answer: r.answer,
     steps: r.tools.length,
     wrappedUp: r.wrappedUp,
+    toolsUsed: r.tools.map((t) => t.name),
     tokens: r.usage.totalTokens,
     firstTokenMs: r.firstTokenMs,
     elapsedMs: r.elapsedMs,
@@ -89,7 +92,8 @@ describe(`W3 C17 · ${CASES.length} 条标注评测集`, () => {
       const cflag = v.caveatOk === null ? '' : v.caveatOk ? ' [口径✓]' : ' [口径✗]';
       console.log(
         `${flag} ${c.id} ${c.cls} ${String(v.steps).padStart(2)}步 ${String(v.tokens).padStart(6)}tok ` +
-        `${String(Date.now() - started).padStart(6)}ms${cflag}${v.wrappedUp ? ' [兜底]' : ''}`,
+        `${String(Date.now() - started).padStart(6)}ms${cflag}` +
+        `${v.toolsUsed.includes('calc') ? ' [calc]' : ''}${v.wrappedUp ? ' [兜底]' : ''}`,
       );
       if (!v.hit) console.log(`     期望 ${v.expected}\n     实答 ${v.answer.slice(0, 160).replace(/\n/g, ' ')}`);
     }
@@ -119,12 +123,16 @@ describe(`W3 C17 · ${CASES.length} 条标注评测集`, () => {
     const empty = verdicts.filter((v) => v.answer.trim().length === 0);
     const noConclusion = verdicts.filter((v) => v.answer.trim().length < NO_CONCLUSION_CHARS);
     const wrapped = verdicts.filter((v) => v.wrappedUp);
+    // calc 使用情况单独统计：跨来源合并题的正确率如果有提升，必须能说清是「用了工具」
+    // 还是「它自己写 SQL 一步算完了」—— 这两种是完全不同的结论。
+    const calcUsed = verdicts.filter((v) => v.toolsUsed.includes('calc')).length;
 
     const metrics = {
       accuracy: hit / n,
       emptyAnswers: empty.length,
       noConclusion: noConclusion.length,
       wrappedUp: wrapped.length,
+      calcUsed,
       caveatHonesty: caveatCases.length ? caveatOk / caveatCases.length : 0,
       avgSteps: steps,
       avgTokens: tokens,
@@ -135,6 +143,7 @@ describe(`W3 C17 · ${CASES.length} 条标注评测集`, () => {
     console.log(`准确率        ${hit}/${n} = ${metrics.accuracy.toFixed(2)}  (门槛 0.70)`);
     console.log(`无结论答案    ${noConclusion.length} 条（真空 ${empty.length} 条）  (门槛 0)`);
     console.log(`兜底收口      ${wrapped.length} 条`);
+    console.log(`用过 calc     ${calcUsed}/${n} 条`);
     console.log(`口径诚实率    ${caveatOk}/${caveatCases.length} = ${metrics.caveatHonesty.toFixed(2)}  (门槛 0.60)`);
     console.log(`平均步数      ${metrics.avgSteps.toFixed(1)}  (门槛 ≤5)`);
     console.log(`平均 token    ${Math.round(metrics.avgTokens)}  (门槛 ≤12000)`);

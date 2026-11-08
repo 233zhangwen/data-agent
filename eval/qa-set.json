@@ -1,9 +1,9 @@
 {
   "meta": {
-    "version": 2,
+    "version": 3,
     "builtAt": "2026-11-08",
     "dataWindow": "orders 覆盖 2025-11-02 ~ 2026-11-01（本地时区）",
-    "why": "W3 C17 建 40 条（四类各 10），W3+ 加 18 条 E 类难题（窗口函数 / 队列留存 / 反连接 / 层级汇总 / 粒度陷阱 / 同比不可算）。参考值一律由参考 SQL 跑出来，不用模型给的数字（防自证）。",
+    "why": "W3 C17 建 40 条（四类各 10）；W3+ 加 18 条 E 类难题（窗口函数 / 队列留存 / 反连接 / 层级汇总 / 粒度陷阱）；W3++ 加 6 条 F 类（跨来源合并：合计 / 差额 / 占比 / 增长率 —— 专治 D07 那种「明细全对、合计加错」）。参考值一律由参考 SQL 跑出来，不用模型给的数字（防自证）。",
     "discipline": "问题里不出现「上个月」「最近 30 天」这类相对时间——参考值会随执行日漂移，评测就不可复跑。要测相对时间理解，只能拿答案的时间边界人工看。",
     "modes": {
       "value": "答案里出现与参考值偏差 ≤ tolerance 的数字（含量级换算）即命中",
@@ -17,7 +17,8 @@
       "B": "跨表 JOIN",
       "C": "时间窗口",
       "D": "口径陷阱（一题多口径）",
-      "E": "难题：派生指标 / 窗口函数 / 队列 / 反连接 / 多层聚合 / 不可算"
+      "E": "难题：派生指标 / 窗口函数 / 队列 / 反连接 / 多层聚合 / 不可算",
+      "F": "跨来源合并：必须把两个查询结果的数合并（合计 / 差额 / 占比 / 增长率）"
     }
   },
   "cases": [
@@ -1339,6 +1340,134 @@
       "unit": "件",
       "value": 2.6,
       "note": "分母要用 count(DISTINCT o.id)：join 明细后直接 count(*) 得到的是明细行数，不是订单数。"
+    },
+    {
+      "id": "F01",
+      "cls": "F",
+      "mode": "value",
+      "question": "2026 年 10 月，电商实收（订单 total_amount 减 discount_amount，排除已取消订单）与 SaaS 收入（账单按期间折算：年付账单除以 12，其余全额；只算 status = paid 且 period_start 在 10 月的账单）合计是多少元？",
+      "sql": [
+        "WITH ec AS (",
+        "  SELECT sum(total_amount - discount_amount) AS a FROM orders",
+        "   WHERE status <> 'cancelled'",
+        "     AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'),",
+        "saas AS (",
+        "  SELECT sum(CASE WHEN (period_end - period_start) >= interval '300 days' THEN amount / 12 ELSE amount END) AS a",
+        "    FROM invoices",
+        "   WHERE status = 'paid'",
+        "     AND period_start >= '2026-10-01' AND period_start < '2026-11-01')",
+        "SELECT round(ec.a + saas.a)::bigint AS v FROM ec, saas"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 8543528,
+      "note": "两个来源相加。错解：只报电商实收 458.4 万（漏掉 SaaS）；或把年付账单全额计入（不除 12），多出约 340 万。"
+    },
+    {
+      "id": "F02",
+      "cls": "F",
+      "mode": "value",
+      "question": "2026 年 10 月，电商实收（订单 total_amount 减 discount_amount，排除已取消订单）比 SaaS 折算收入（账单按期间折算：年付账单除以 12，其余全额；只算 status = paid 且 period_start 在 10 月的账单）多多少元？（电商实收 − SaaS，允许为负）",
+      "sql": [
+        "WITH ec AS (",
+        "  SELECT sum(total_amount - discount_amount) AS a FROM orders",
+        "   WHERE status <> 'cancelled'",
+        "     AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'),",
+        "saas AS (",
+        "  SELECT sum(CASE WHEN (period_end - period_start) >= interval '300 days' THEN amount / 12 ELSE amount END) AS a",
+        "    FROM invoices",
+        "   WHERE status = 'paid'",
+        "     AND period_start >= '2026-10-01' AND period_start < '2026-11-01')",
+        "SELECT round(ec.a - saas.a)::bigint AS v FROM ec, saas"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 624054,
+      "note": "必须相减，且两个数来自不同表。错解：把 SaaS 的 open 账单也算进来；或忘了年付折算；**把 SaaS 理解成活跃订阅 MRR（546.9 万）而不是账单口径** —— 见下。\n第一版题面写「接上题口径」，但评测逐题独立、模型看不到上一题，它只能猜，猜成 MRR 口径得 −88.6 万（同时给出账单全额 662.0 万那个更错的口径）。题面展开后无歧义。**出题纪律：题面不许出现跨题指代（「上题」「同上」），每道题必须自带完整口径。**"
+    },
+    {
+      "id": "F03",
+      "cls": "F",
+      "mode": "value",
+      "question": "在全部 status = active 的订阅里，「企业版」年付订阅的 MRR 占总额的百分之几？（MRR 口径：年付套餐按年价除 12、月付按月价；席位费按 seat_price × seats 计，seat_price 是月价不折算。保留一位小数）",
+      "sql": [
+        "WITH per AS (",
+        "  SELECT p.name, s.billing_cycle,",
+        "         sum(CASE WHEN s.billing_cycle = 'annual' THEN p.annual_price / 12 ELSE p.monthly_price END",
+        "             + p.seat_price * s.seats) AS mrr",
+        "    FROM subscriptions s JOIN plans p ON p.id = s.plan_id",
+        "   WHERE s.status = 'active'",
+        "   GROUP BY 1, 2)",
+        "SELECT round(100.0 * sum(mrr) FILTER (WHERE name = '企业版' AND billing_cycle = 'annual') / sum(mrr), 1) AS v",
+        "  FROM per"
+      ],
+      "tolerance": 0.02,
+      "unit": "%",
+      "value": 19.5,
+      "note": "分项 ÷ 合计。错解：席位费也除以 12（D07 修过的老坑，占比会偏小）；或分母用全部订阅（含 trialing/past_due）。"
+    },
+    {
+      "id": "F04",
+      "cls": "F",
+      "mode": "value",
+      "question": "2026 年 10 月的 GMV（订单 total_amount − discount_amount，排除已取消）比 2026 年 9 月增长了百分之几？（增长率保留一位小数，下降则为负）",
+      "sql": [
+        "WITH m AS (",
+        "  SELECT sum(total_amount - discount_amount) FILTER (WHERE ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01') AS oct,",
+        "         sum(total_amount - discount_amount) FILTER (WHERE ordered_at >= '2026-09-01' AND ordered_at < '2026-10-01') AS sep",
+        "    FROM orders WHERE status <> 'cancelled')",
+        "SELECT round((oct / sep - 1) * 100, 1) AS v FROM m"
+      ],
+      "tolerance": 0.02,
+      "unit": "%",
+      "value": 20.9,
+      "note": "两次聚合后相除。错解：用订单数代替金额（得到另一个数）；或把 11 月头几笔算进 10 月。单条 SQL 能算出来，但模型常分两次查再心算相除。"
+    },
+    {
+      "id": "F05",
+      "cls": "F",
+      "mode": "value",
+      "question": "2025-11 到 2026-10 这一年，按商品汇总销售额（订单明细 subtotal，排除已取消）后，第 4 名到第 10 名的合计比前 3 名的合计多多少元？",
+      "sql": [
+        "WITH pp AS (",
+        "  SELECT p.id, sum(oi.subtotal) AS amt",
+        "    FROM orders o",
+        "    JOIN order_items oi ON oi.order_id = o.id",
+        "    JOIN product_variants pv ON pv.id = oi.variant_id",
+        "    JOIN products p ON p.id = pv.product_id",
+        "   WHERE o.status <> 'cancelled'",
+        "     AND o.ordered_at >= '2025-11-01' AND o.ordered_at < '2026-11-01'",
+        "   GROUP BY p.id),",
+        "r AS (SELECT amt, row_number() OVER (ORDER BY amt DESC) AS rn FROM pp)",
+        "SELECT round(sum(amt) FILTER (WHERE rn BETWEEN 4 AND 10) - sum(amt) FILTER (WHERE rn <= 3))::bigint AS v FROM r"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "value": 1449717,
+      "note": "两个分组相减。错解：把「前 3 名自身合计」当分母（恒等于 100%）；或用 rank() 而不是 row_number()（销售额并列时名额数不对）。"
+    },
+    {
+      "id": "F06",
+      "cls": "F",
+      "mode": "all",
+      "question": "2026 年 10 月，首次下单客户（2026-10-01 之前没有任何非取消订单）的客单价，和此前已有非取消订单的老客户客单价，分别是多少元？（客单价 = 实收合计 ÷ 该组订单数，实收 = total_amount − discount_amount，四舍五入到元；两个数都要给）",
+      "sql": [
+        "WITH f AS (SELECT customer_id, min(ordered_at) AS fa FROM orders WHERE status <> 'cancelled' GROUP BY 1)",
+        "SELECT round(sum(o.total_amount - o.discount_amount) FILTER (WHERE f.fa >= '2026-10-01')::numeric",
+        "             / nullif(count(*) FILTER (WHERE f.fa >= '2026-10-01'), 0))::bigint AS new_aov,",
+        "       round(sum(o.total_amount - o.discount_amount) FILTER (WHERE f.fa < '2026-10-01')::numeric",
+        "             / nullif(count(*) FILTER (WHERE f.fa < '2026-10-01'), 0))::bigint AS old_aov",
+        "  FROM orders o JOIN f ON f.customer_id = o.customer_id",
+        " WHERE o.status <> 'cancelled'",
+        "   AND o.ordered_at >= '2026-10-01' AND o.ordered_at < '2026-11-01'"
+      ],
+      "tolerance": 0.01,
+      "unit": "元",
+      "values": [
+        3750,
+        3833
+      ],
+      "note": "两组各算一次除法后再比较（mode=all，两个都要对）。错解：分母用去重客户数而不是订单数；或按注册时间分新老（那是另一个口径）。两个数很接近（3750 / 3833），差 83 元，正好检验它到底有没有真的分组算。"
     }
   ]
 }

@@ -77,6 +77,11 @@ export async function runTurn(
         break;
       }
       case 'tool-call': {
+        // DEBUG_TOOLS=1 时把工具入参打到日志：回答「calc 的哪个 op 真的被用了」
+        // （尤其是 verify_sum —— 如果它从没被调用，那第 3 层自检就是死代码）
+        if (process.env.DEBUG_TOOLS) {
+          console.log(`[tool] ${String(part.toolName)} ${JSON.stringify(part.input)}`);
+        }
         tools.push({
           id: String(part.toolCallId),
           name: String(part.toolName),
