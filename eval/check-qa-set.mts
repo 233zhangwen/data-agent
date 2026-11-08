@@ -17,13 +17,16 @@ import pg from 'pg';
 import fs from 'fs';
 
 type Alt = { sql: string[]; note: string; value?: number | null };
+/** 一个可接受口径：自带参考 SQL，值由 SQL 算出（不由人工填）。 */
+type Interp = { label: string; keywords?: string[]; sql: string[]; value?: number | null };
 type Case = {
   id: string;
   cls: 'A' | 'B' | 'C' | 'D';
-  mode: 'value' | 'series' | 'caveat' | 'refuse';
+  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
   question: string;
-  sql: string[];
+  sql?: string[];
   alts?: Alt[];
+  interpretations?: Interp[];
   value?: number | null;
   values?: number[] | null;
   tolerance?: number;
@@ -50,23 +53,58 @@ let missing = 0;
 let filled = 0;
 
 for (const c of set.cases) {
-  if (c.mode === 'refuse') {
-    console.log(`—  ${c.id} ${c.cls} ${c.mode.padEnd(6)} 跳过（无参考 SQL，判的是拒答行为）`);
+  if (c.mode === 'refuse' || c.mode === 'qualitative') {
+    console.log(`—  ${c.id} ${c.cls} ${c.mode.padEnd(15)} 跳过（判的是行为，不是数字）`);
+    continue;
+  }
+
+  // D 类口径题：每个可接受口径一条参考 SQL，逐个算真值。
+  // 不做这一步的后果 W3 已经验过：同一题四次跑给四个数、四个都对，全被单一数字判据判成错。
+  if (c.mode === 'interpretations') {
+    const interps = c.interpretations ?? [];
+    if (interps.length === 0) {
+      console.error(`✗ ${c.id} interpretations 模式但没配口径`);
+      process.exitCode = 1;
+      continue;
+    }
+    const got: string[] = [];
+    for (const it of interps) {
+      try {
+        const r = await client.query(it.sql.join('\n'));
+        const v = r.rows.length ? Number(Object.values(r.rows[0])[0]) : null;
+        const prev = it.value ?? null;
+        const same =
+          prev !== null && v !== null && Math.abs(prev - v) <= Math.abs(prev) * 0.0001 + 0.01;
+        if (prev === null || prev === undefined) {
+          missing++;
+        } else if (!same) {
+          drift++;
+        }
+        if (WRITE) it.value = v;
+        got.push(`${it.label}=${v}${same ? '' : prev === null ? '（新）' : '（漂移）'}`);
+      } catch (e) {
+        console.error(`✗ ${c.id} 口径「${it.label}」的 SQL 跑不通：${(e as Error).message}`);
+        process.exitCode = 1;
+      }
+    }
+    console.log(`✓ ${c.id} ${c.cls} interpretations ${interps.length} 个口径`);
+    for (const g of got) console.log(`     ${g}`);
     continue;
   }
 
   let computed: number | number[] | null = null;
+  const mainSql = c.sql?.join('\n') ?? '';
   try {
     if (c.mode === 'series') {
-      const r = await client.query(c.sql.join('\n'));
+      const r = await client.query(mainSql);
       computed = r.rows.map((row) => Number(Object.values(row)[Object.keys(row).length - 1]));
     } else {
-      const r = await client.query(c.sql.join('\n'));
+      const r = await client.query(mainSql);
       computed = r.rows.length ? Number(Object.values(r.rows[0])[0]) : null;
     }
   } catch (e) {
     console.error(`✗ ${c.id} 参考 SQL 本身跑不通：${(e as Error).message}`);
-    console.error(`   ${c.sql.join(' ')}`);
+    console.error(`   ${mainSql}`);
     process.exitCode = 1;
     continue;
   }

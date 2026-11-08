@@ -492,12 +492,8 @@
     {
       "id": "D02",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "我们的复购率是多少？",
-      "sql": [
-        "SELECT round(100.0 * count(*) FILTER (WHERE cnt >= 2) / count(*), 1)::float AS v",
-        "FROM (SELECT customer_id, count(*) AS cnt FROM orders WHERE status <> 'cancelled' GROUP BY 1) t"
-      ],
       "tolerance": 0.05,
       "unit": "%",
       "caveatKeywords": [
@@ -508,48 +504,49 @@
         "按客户",
         "按订单"
       ],
-      "note": "复购率至少两种算法（客户维度 / 订单维度），必须说明用的是哪种",
-      "value": 58.7
+      "note": "复购率至少两种算法：客户维度（≥2 单客户占比）与订单维度（回头单占比），两者差 20 个百分点以上，选哪个都行但必须说清。第一版只配了客户维度的值，答案给订单维度就会冤判。",
+      "interpretations": [
+        {
+          "label": "客户维度：下过 ≥2 单的客户 / 下过单的客户",
+          "keywords": [
+            "按客户",
+            "客户维度",
+            "客户数",
+            "客户口径",
+            "客户为单位"
+          ],
+          "sql": [
+            "SELECT round(100.0 * count(*) FILTER (WHERE cnt >= 2) / count(*), 1)::float AS v",
+            "FROM (SELECT customer_id, count(*) AS cnt FROM orders WHERE status <> 'cancelled' GROUP BY 1) t"
+          ],
+          "value": 58.7
+        },
+        {
+          "label": "订单维度：复购订单 / 全部有效订单",
+          "keywords": [
+            "按订单",
+            "订单维度",
+            "订单口径",
+            "二次",
+            "回头"
+          ],
+          "sql": [
+            "WITH o AS (",
+            "  SELECT customer_id,",
+            "         row_number() OVER (PARTITION BY customer_id ORDER BY ordered_at) AS rn",
+            "  FROM orders WHERE status <> 'cancelled'",
+            ")",
+            "SELECT round(100.0 * count(*) FILTER (WHERE rn > 1) / count(*), 1)::float AS v FROM o"
+          ],
+          "value": 55
+        }
+      ]
     },
     {
       "id": "D03",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "2026 年 10 月我们的总收入是多少？",
-      "sql": [
-        "SELECT round(sum(total_amount - discount_amount))::bigint AS v FROM orders",
-        "WHERE status <> 'cancelled'",
-        "  AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'"
-      ],
-      "alts": [
-        {
-          "sql": [
-            "SELECT (",
-            "  (SELECT sum(total_amount - discount_amount) FROM orders",
-            "     WHERE status <> 'cancelled'",
-            "       AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
-            "  + (SELECT coalesce(sum(amount), 0) FROM payments",
-            "     WHERE status = 'succeeded'",
-            "       AND paid_at >= '2026-10-01' AND paid_at < '2026-11-01')",
-            ")::bigint AS v"
-          ],
-          "note": "电商实收 + SaaS 实收（payments）的合计",
-          "value": 10668394
-        },
-        {
-          "sql": [
-            "SELECT (",
-            "  (SELECT sum(total_amount - discount_amount) FROM orders",
-            "     WHERE status NOT IN ('cancelled', 'refunded')",
-            "       AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
-            "  + (SELECT coalesce(sum(amount), 0) FROM invoices",
-            "     WHERE period_start >= '2026-10-01' AND period_start < '2026-11-01')",
-            ")::bigint AS v"
-          ],
-          "note": "电商（再排除 refunded）+ 当月开票额全额（含 open 账单）",
-          "value": 11089675
-        }
-      ],
       "tolerance": 0.02,
       "unit": "元",
       "caveatKeywords": [
@@ -562,35 +559,92 @@
         "口径",
         "不含"
       ],
-      "note": "陷阱：两条业务线 + 至少三种口径（实收 / 开票额 / 年付分摊）。复核时模型给出三种并说明差异，全部可复现，故补第三种备选。",
-      "value": 4583791
+      "note": "陷阱：两条业务线（电商 + SaaS）+ 至少三种口径（仅电商 / 两条线实收 / 两条线应收开票）。三种都在真实评测里出现过，逐项 SQL 复核过——只配一个值就会把另外两个判成错。 第五个口径（电商含 refunded + 账单应收全额 = 1,120.4 万）是这一轮评测里模型给出的结论，SQL 复现一致后补入——它是财务最常用的「当月应收」口径。",
+      "interpretations": [
+        {
+          "label": "仅电商 GMV（不含 SaaS）",
+          "keywords": [
+            "仅电商",
+            "只算电商",
+            "不含SaaS",
+            "不含 SaaS",
+            "不含订阅",
+            "未含订阅",
+            "不计订阅"
+          ],
+          "sql": [
+            "SELECT round(sum(total_amount - discount_amount))::bigint AS v FROM orders",
+            "WHERE status <> 'cancelled'",
+            "  AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01'"
+          ],
+          "value": 4583791
+        },
+        {
+          "label": "电商实收 + SaaS 实收（payments）",
+          "keywords": [
+            "SaaS",
+            "订阅",
+            "实收",
+            "到账",
+            "payments"
+          ],
+          "sql": [
+            "SELECT (",
+            "  (SELECT sum(total_amount - discount_amount) FROM orders",
+            "     WHERE status <> 'cancelled'",
+            "       AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
+            "  + (SELECT coalesce(sum(amount), 0) FROM payments",
+            "     WHERE status = 'succeeded'",
+            "       AND paid_at >= '2026-10-01' AND paid_at < '2026-11-01')",
+            ")::bigint AS v"
+          ],
+          "value": 10668394
+        },
+        {
+          "label": "电商（含 refunded）+ 账单应收全额",
+          "keywords": [
+            "应收",
+            "开票",
+            "invoice",
+            "账单"
+          ],
+          "sql": [
+            "SELECT (",
+            "  (SELECT sum(total_amount - discount_amount) FROM orders",
+            "     WHERE status <> 'cancelled'",
+            "       AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
+            "  + (SELECT coalesce(sum(amount), 0) FROM invoices",
+            "     WHERE period_start >= '2026-10-01' AND period_start < '2026-11-01')",
+            ")::bigint AS v"
+          ],
+          "value": 11203946
+        },
+        {
+          "label": "电商（排 refunded）+ 当月开票额",
+          "keywords": [
+            "排除 refunded",
+            "排 refunded",
+            "剔除退款单",
+            "不含 refunded"
+          ],
+          "sql": [
+            "SELECT (",
+            "  (SELECT sum(total_amount - discount_amount) FROM orders",
+            "     WHERE status NOT IN ('cancelled', 'refunded')",
+            "       AND ordered_at >= '2026-10-01' AND ordered_at < '2026-11-01')",
+            "  + (SELECT coalesce(sum(amount), 0) FROM invoices",
+            "     WHERE period_start >= '2026-10-01' AND period_start < '2026-11-01')",
+            ")::bigint AS v"
+          ],
+          "value": 11089675
+        }
+      ]
     },
     {
       "id": "D04",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "我们有多少活跃用户？",
-      "sql": [
-        "SELECT count(DISTINCT customer_id)::bigint AS v FROM orders",
-        "WHERE status <> 'cancelled'",
-        "  AND ordered_at >= '2026-08-01' AND ordered_at < '2026-11-01'"
-      ],
-      "alts": [
-        {
-          "sql": [
-            "SELECT count(DISTINCT customer_id)::bigint AS v FROM subscriptions WHERE status = 'active'"
-          ],
-          "note": "活跃订阅客户数",
-          "value": 2716
-        },
-        {
-          "sql": [
-            "SELECT count(*)::bigint AS v FROM customers"
-          ],
-          "note": "注册数（最宽松的定义，也算一种回答但必须说明）",
-          "value": 20000
-        }
-      ],
       "tolerance": 0.02,
       "caveatKeywords": [
         "定义",
@@ -602,27 +656,53 @@
         "下单",
         "订阅"
       ],
-      "note": "「活跃」没有唯一定义：近三个月下单 / 有活跃订阅 / 注册。三选一都算对，但必须说清用的是哪个",
-      "value": 2474
+      "note": "「活跃」没有唯一定义：近三个月下单 / 有活跃订阅 / 注册。三选一都算对，但必须说清用的是哪个——这也正是 caveatOk 存在的意义。",
+      "interpretations": [
+        {
+          "label": "近三个月下过单的客户",
+          "keywords": [
+            "近三个月",
+            "最近三个月",
+            "90 天",
+            "90天",
+            "下单"
+          ],
+          "sql": [
+            "SELECT count(DISTINCT customer_id)::bigint AS v FROM orders",
+            "WHERE status <> 'cancelled'",
+            "  AND ordered_at >= '2026-08-01' AND ordered_at < '2026-11-01'"
+          ],
+          "value": 2474
+        },
+        {
+          "label": "有活跃订阅的客户",
+          "keywords": [
+            "订阅"
+          ],
+          "sql": [
+            "SELECT count(DISTINCT customer_id)::bigint AS v FROM subscriptions WHERE status = 'active'"
+          ],
+          "value": 2716
+        },
+        {
+          "label": "注册客户总数（最宽松）",
+          "keywords": [
+            "注册",
+            "全部客户",
+            "累计"
+          ],
+          "sql": [
+            "SELECT count(*)::bigint AS v FROM customers"
+          ],
+          "value": 20000
+        }
+      ]
     },
     {
       "id": "D05",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "平均订单金额是多少？",
-      "sql": [
-        "SELECT round(avg(total_amount - discount_amount))::bigint AS v FROM orders",
-        "WHERE status <> 'cancelled'"
-      ],
-      "alts": [
-        {
-          "sql": [
-            "SELECT round(avg(total_amount))::bigint AS v FROM orders"
-          ],
-          "note": "不过滤取消、且用未扣优惠的金额",
-          "value": 3713
-        }
-      ],
       "tolerance": 0.03,
       "unit": "元",
       "caveatKeywords": [
@@ -633,20 +713,48 @@
         "含",
         "不含"
       ],
-      "note": "陷阱：取消单算不算、优惠扣不扣。值有多个正确答案，但要说清",
-      "value": 3661
+      "note": "陷阱：取消单算不算、优惠扣不扣。两个变量 = 四种组合，其中两种在真实评测里出现过，都给。",
+      "interpretations": [
+        {
+          "label": "排除取消单、扣优惠后",
+          "keywords": [
+            "排除取消",
+            "不含取消",
+            "剔除取消",
+            "排除 cancelled",
+            "不含 cancelled",
+            "折后",
+            "净",
+            "实收"
+          ],
+          "sql": [
+            "SELECT round(avg(total_amount - discount_amount))::bigint AS v FROM orders",
+            "WHERE status <> 'cancelled'"
+          ],
+          "value": 3661
+        },
+        {
+          "label": "含取消单、未扣优惠",
+          "keywords": [
+            "包含取消",
+            "含取消",
+            "含 cancelled",
+            "未扣",
+            "原价"
+          ],
+          "sql": [
+            "SELECT round(avg(total_amount))::bigint AS v FROM orders"
+          ],
+          "value": 3713
+        }
+      ]
     },
     {
       "id": "D06",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "客户流失率是多少？",
-      "sql": [
-        "SELECT round(100.0 * count(*) FILTER (WHERE canceled_at IS NOT NULL AND canceled_at >= '2026-10-01' AND canceled_at < '2026-11-01')",
-        "  / nullif(count(*) FILTER (WHERE started_at < '2026-10-01' AND (canceled_at IS NULL OR canceled_at >= '2026-10-01')), 0), 1)::float AS v",
-        "FROM subscriptions"
-      ],
-      "tolerance": 0.1,
+      "tolerance": 0.03,
       "unit": "%",
       "caveatKeywords": [
         "分母",
@@ -656,21 +764,54 @@
         "月",
         "期间"
       ],
-      "note": "陷阱：分母是期初活跃数（不是全部订阅数），且要指定时间窗口",
-      "value": 2
+      "note": "陷阱：分母是期初活跃数（不是全部订阅数），且必须指定时间窗口。单月与三月平均都是常见口径。 容差从 0.1 收到 0.03：0.1 意味着 ±10%，而答案里自带 12 个月的分月流失率，任意一个月都可能落进窗口（变异检验里 6 个月度值全部命中）。",
+      "interpretations": [
+        {
+          "label": "2026-10 单月（分母=期初活跃）",
+          "keywords": [
+            "期初",
+            "月度",
+            "10 月",
+            "10月",
+            "当月"
+          ],
+          "sql": [
+            "SELECT round(100.0 * count(*) FILTER (WHERE canceled_at IS NOT NULL AND canceled_at >= '2026-10-01' AND canceled_at < '2026-11-01')",
+            "  / nullif(count(*) FILTER (WHERE started_at < '2026-10-01' AND (canceled_at IS NULL OR canceled_at >= '2026-10-01')), 0), 1)::float AS v",
+            "FROM subscriptions"
+          ],
+          "value": 2
+        },
+        {
+          "label": "2026-08~10 平均月度",
+          "keywords": [
+            "平均",
+            "三个月",
+            "近三个月",
+            "均值"
+          ],
+          "sql": [
+            "WITH m AS (",
+            "  SELECT generate_series('2026-08-01'::timestamp, '2026-10-01'::timestamp, '1 month') AS mon",
+            ")",
+            "SELECT round(100.0 * avg(rate), 1)::float AS v FROM (",
+            "  SELECT (SELECT count(*) FROM subscriptions s",
+            "           WHERE s.canceled_at >= m.mon AND s.canceled_at < m.mon + interval '1 month')::numeric",
+            "       / nullif((SELECT count(*) FROM subscriptions s",
+            "           WHERE s.started_at < m.mon",
+            "             AND (s.canceled_at IS NULL OR s.canceled_at >= m.mon)), 0) AS rate",
+            "  FROM m",
+            ") t"
+          ],
+          "value": 1.8
+        }
+      ]
     },
     {
       "id": "D07",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "现在的 MRR 是多少？",
-      "sql": [
-        "SELECT round(sum(CASE WHEN s.billing_cycle = 'monthly'",
-        "    THEN p.monthly_price + s.seats * p.seat_price",
-        "    ELSE p.annual_price / 12.0 + s.seats * p.seat_price END))::bigint AS v",
-        "FROM subscriptions s JOIN plans p ON p.id = s.plan_id",
-        "WHERE s.status = 'active'"
-      ],
       "tolerance": 0.02,
       "unit": "元",
       "caveatKeywords": [
@@ -682,38 +823,32 @@
         "月度",
         "折算"
       ],
-      "note": "陷阱：年付只把年价除 12，席位费按月不除（seat_price 是月价 30/50/80）。第一版参考 SQL 把席位费也除了 12，少算 25%——复核时被模型纠正。",
-      "value": 5479835
+      "note": "陷阱：年付只把年价除 12，席位费按月不除（seat_price 是月价 30/50/80）。第一版参考 SQL 把席位费也除 12，少算 25%——复核时被模型纠正。MRR 本身只有一个正确答案，所以只配一个口径，靠 keywords 检查它有没有说清折算方式。",
+      "interpretations": [
+        {
+          "label": "年付除 12 + 席位费按月",
+          "keywords": [
+            "年付",
+            "12",
+            "折算",
+            "席位"
+          ],
+          "sql": [
+            "SELECT round(sum(CASE WHEN s.billing_cycle = 'monthly'",
+            "    THEN p.monthly_price + s.seats * p.seat_price",
+            "    ELSE p.annual_price / 12.0 + s.seats * p.seat_price END))::bigint AS v",
+            "FROM subscriptions s JOIN plans p ON p.id = s.plan_id",
+            "WHERE s.status = 'active'"
+          ],
+          "value": 5479835
+        }
+      ]
     },
     {
       "id": "D08",
       "cls": "D",
-      "mode": "caveat",
+      "mode": "interpretations",
       "question": "哪个品类最赚钱？",
-      "sql": [
-        "WITH share AS (",
-        "  SELECT oi.id AS item_id, p.category_id,",
-        "         (o.total_amount - o.discount_amount) * oi.subtotal",
-        "           / NULLIF(sum(oi.subtotal) OVER (PARTITION BY oi.order_id), 0) AS net",
-        "  FROM order_items oi",
-        "  JOIN orders o ON o.id = oi.order_id",
-        "  JOIN product_variants pv ON pv.id = oi.variant_id",
-        "  JOIN products p ON p.id = pv.product_id",
-        "  WHERE o.status <> 'cancelled'",
-        "),",
-        "refund AS (",
-        "  SELECT oi.id AS item_id, sum(r.refund_amount) AS amt",
-        "  FROM returns r JOIN order_items oi ON oi.id = r.order_item_id",
-        "  GROUP BY oi.id",
-        ")",
-        "SELECT round(sum(share.net - coalesce(refund.amt, 0)))::bigint AS v,",
-        "       COALESCE(parent.name, c.name) AS cat",
-        "FROM share",
-        "LEFT JOIN refund ON refund.item_id = share.item_id",
-        "JOIN categories c ON c.id = share.category_id",
-        "LEFT JOIN categories parent ON parent.id = c.parent_id",
-        "GROUP BY COALESCE(parent.name, c.name) ORDER BY 1 DESC LIMIT 1"
-      ],
       "tolerance": 0.01,
       "unit": "元（收入，不是利润）",
       "caveatKeywords": [
@@ -724,9 +859,48 @@
         "只能",
         "收入"
       ],
-      "note": "陷阱：库里没有成本字段，「赚钱」只能等于「收入最高」，必须说清。参考值取更严格的「净营收」= 订单折扣分摊后再扣退货退款；不扣退款的版本作为备选。第一版直加 subtotal（原价），第二版没扣退款，两次都是模型比我严谨。",
-      "alts": [
+      "note": "陷阱：库里没有成本字段，「赚钱」只能等于「收入最高」，必须说清。四轮评测里模型给过四个数：3057.4 / 3014.7 / 2907.2 / 2950.0 万，全部逐项 SQL 复现过——它们只是收入口径不同（原价 vs 折后分摊、扣不扣退款），排名一致。继续用单一数字判就等于在调指标，所以改成四个口径都收。",
+      "interpretations": [
         {
+          "label": "折后分摊 − 退款（净营收）",
+          "keywords": [
+            "成本",
+            "毛利",
+            "利润"
+          ],
+          "sql": [
+            "WITH share AS (",
+            "  SELECT oi.id AS item_id, p.category_id,",
+            "         (o.total_amount - o.discount_amount) * oi.subtotal",
+            "           / NULLIF(sum(oi.subtotal) OVER (PARTITION BY oi.order_id), 0) AS net",
+            "  FROM order_items oi",
+            "  JOIN orders o ON o.id = oi.order_id",
+            "  JOIN product_variants pv ON pv.id = oi.variant_id",
+            "  JOIN products p ON p.id = pv.product_id",
+            "  WHERE o.status <> 'cancelled'",
+            "),",
+            "refund AS (",
+            "  SELECT oi.id AS item_id, sum(r.refund_amount) AS amt",
+            "  FROM returns r JOIN order_items oi ON oi.id = r.order_item_id",
+            "  GROUP BY oi.id",
+            ")",
+            "SELECT round(sum(share.net - coalesce(refund.amt, 0)))::bigint AS v,",
+            "       COALESCE(parent.name, c.name) AS cat",
+            "FROM share",
+            "LEFT JOIN refund ON refund.item_id = share.item_id",
+            "JOIN categories c ON c.id = share.category_id",
+            "LEFT JOIN categories parent ON parent.id = c.parent_id",
+            "GROUP BY COALESCE(parent.name, c.name) ORDER BY 1 DESC LIMIT 1"
+          ],
+          "value": 29072219
+        },
+        {
+          "label": "折后分摊，不扣退款",
+          "keywords": [
+            "成本",
+            "毛利",
+            "利润"
+          ],
           "sql": [
             "WITH share AS (",
             "  SELECT p.category_id,",
@@ -744,11 +918,57 @@
             "LEFT JOIN categories parent ON parent.id = c.parent_id",
             "GROUP BY COALESCE(parent.name, c.name) ORDER BY 1 DESC LIMIT 1"
           ],
-          "note": "只扣订单折扣、未扣退货退款（第二版参考 SQL 的口径）",
           "value": 30147177
+        },
+        {
+          "label": "subtotal 原价直加",
+          "keywords": [
+            "成本",
+            "毛利",
+            "利润"
+          ],
+          "sql": [
+            "SELECT round(sum(oi.subtotal))::bigint AS v, COALESCE(parent.name, c.name) AS cat",
+            "FROM order_items oi",
+            "JOIN orders o ON o.id = oi.order_id",
+            "JOIN product_variants pv ON pv.id = oi.variant_id",
+            "JOIN products p ON p.id = pv.product_id",
+            "JOIN categories c ON c.id = p.category_id",
+            "LEFT JOIN categories parent ON parent.id = c.parent_id",
+            "WHERE o.status <> 'cancelled'",
+            "GROUP BY COALESCE(parent.name, c.name) ORDER BY 1 DESC LIMIT 1"
+          ],
+          "value": 30574452
+        },
+        {
+          "label": "subtotal 原价 − 退款",
+          "keywords": [
+            "成本",
+            "毛利",
+            "利润"
+          ],
+          "sql": [
+            "WITH base AS (",
+            "  SELECT oi.id AS item_id, p.category_id, oi.subtotal AS net",
+            "  FROM order_items oi",
+            "  JOIN orders o ON o.id = oi.order_id",
+            "  JOIN product_variants pv ON pv.id = oi.variant_id",
+            "  JOIN products p ON p.id = pv.product_id",
+            "  WHERE o.status <> 'cancelled'",
+            "), refund AS (",
+            "  SELECT oi.id AS item_id, sum(r.refund_amount) AS amt",
+            "  FROM returns r JOIN order_items oi ON oi.id = r.order_item_id GROUP BY oi.id",
+            ")",
+            "SELECT round(sum(base.net - coalesce(refund.amt, 0)))::bigint AS v,",
+            "       COALESCE(parent.name, c.name) AS cat",
+            "FROM base LEFT JOIN refund ON refund.item_id = base.item_id",
+            "JOIN categories c ON c.id = base.category_id",
+            "LEFT JOIN categories parent ON parent.id = c.parent_id",
+            "GROUP BY COALESCE(parent.name, c.name) ORDER BY 1 DESC LIMIT 1"
+          ],
+          "value": 29499494
         }
-      ],
-      "value": 29072219
+      ]
     },
     {
       "id": "D09",

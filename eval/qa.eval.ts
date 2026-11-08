@@ -13,24 +13,9 @@ import { describe, it } from 'vitest';
 import fs from 'fs';
 import { runTurn, type TurnResult } from './harness';
 import { judgeAnswer } from '../src/lib/qa-judge';
+import { toJudgeInput, type EvalCase } from './judge-input';
 
-type Alt = { sql: string[]; note: string; value?: number | null };
-type Case = {
-  id: string;
-  cls: 'A' | 'B' | 'C' | 'D';
-  mode: 'value' | 'series' | 'caveat' | 'refuse';
-  question: string;
-  sql: string[];
-  alts?: Alt[];
-  value?: number | null;
-  values?: number[] | null;
-  tolerance?: number;
-  unit?: string;
-  caveatKeywords?: string[];
-  note?: string;
-};
-
-const SET = JSON.parse(fs.readFileSync('eval/qa-set.json', 'utf8')) as { meta: unknown; cases: Case[] };
+const SET = JSON.parse(fs.readFileSync('eval/qa-set.json', 'utf8')) as { meta: unknown; cases: EvalCase[] };
 
 // ------------------------------------------------------------------ 判定
 
@@ -52,19 +37,8 @@ type Verdict = {
   elapsedMs: number;
 };
 
-function judge(c: Case, r: TurnResult): Verdict {
-  const v = judgeAnswer(
-    {
-      mode: c.mode,
-      value: c.value,
-      values: c.values,
-      altValues: (c.alts ?? []).map((a) => a.value),
-      tolerance: c.tolerance,
-      unit: c.unit,
-      caveatKeywords: c.caveatKeywords,
-    },
-    r.answer,
-  );
+function judge(c: EvalCase, r: TurnResult): Verdict {
+  const v = judgeAnswer(toJudgeInput(c), r.answer);
   return {
     id: c.id,
     cls: c.cls,

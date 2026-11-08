@@ -51,8 +51,12 @@ function nearUnit(text: string, at: number, raw: string, unit: string): boolean 
 }
 
 /**
- * 答案里是否存在命中 `target` 的数字。返回命中的那个值，未命中返回 null。
- * 未命中 = 真的没提到这个数，不含「换了个口径」——多口径由调用方传 alts。
+ * 答案里是否存在命中 `target` 的数字。返回命中的值与它在文中的位置，未命中返回 null。
+ * 未命中 = 真的没提到这个数，不含「换了个口径」——多口径由调用方传 interpretations。
+ *
+ * `at` 是给「一条答案里出现多个口径的数字」用的：D03 的答案先给结论 1,120.4 万，
+ * 后面的表格里又列了分项 458.4 万。只看「命中了哪个值」会命中分项，
+ * 取位置最靠前的那个才等于取结论。
  */
 export function matchesReference(
   text: string,
@@ -60,14 +64,14 @@ export function matchesReference(
   target: number,
   tol: number,
   unit?: string,
-): number | null {
+): { value: number; at: number } | null {
   const lo = target - Math.abs(target) * tol - 0.01;
   const hi = target + Math.abs(target) * tol + 0.01;
   const small = Math.abs(target) < 200;
   for (const n of nums) {
     if (n.value < lo || n.value > hi) continue;
     if (small && unit && !nearUnit(text, n.at, n.raw, unit)) continue;
-    return n.value;
+    return { value: n.value, at: n.at };
   }
   return null;
 }
@@ -75,14 +79,32 @@ export function matchesReference(
 /** 拒答类关键词：出现任一即视为「说明了数据不存在」。 */
 const REFUSE_WORDS = ['无法', '没有', '不存在', '查不到', '不包含', '不能', '未知', '缺', '不足', '无数据', '不涉及'];
 
+/**
+ * 一个可接受的口径（D 类题的判据单元）。
+ *
+ * `keywords` 不是可有可无的装饰：它解决的是「数字对、但解释是另一套口径」这种
+ * 最容易被漏掉的情况——答案写着 2950 万（原价 − 退款）却解释成"已按折扣分摊"，
+ * 数字能对上某个口径，但那句话是错的。只比数字会判它对，比关键词才判得出问题。
+ */
+export type Interpretation = {
+  /** 口径名，报告里直接展示「它选了哪个口径」。 */
+  label: string;
+  /** 该口径下的参考值；null 表示还没校准（判据会跳过，不静默当成 0）。 */
+  value?: number | null;
+  /** 这个口径必然出现在解释里的词，任一命中即认为它说明了口径。 */
+  keywords?: string[];
+};
+
 export type JudgeInput = {
-  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative';
+  mode: 'value' | 'series' | 'caveat' | 'refuse' | 'qualitative' | 'interpretations';
   value?: number | null;
   values?: number[] | null;
   altValues?: (number | null | undefined)[];
   tolerance?: number;
   unit?: string;
   caveatKeywords?: string[];
+  /** interpretations 模式专用：可接受口径清单（第一个是主口径）。 */
+  interpretations?: Interpretation[];
 };
 
 export type JudgeOutput = {
@@ -97,7 +119,9 @@ export type JudgeOutput = {
  * 判一条答案。
  * - value/caveat：主值或任一备选口径命中 → hit；caveat 另判关键词
  * - series：参考值集合覆盖 ≥80% → hit
- * - refuse：说明无法计算，且没有同时给出大额精确数字（那是编造）
+ * - refuse：说明无法计算（W3 起不再因附录数字判编造，那会误伤正确拒答）
+ * - qualitative：只判统计陷阱有没有被点出
+ * - interpretations：命中任一可接受口径 → hit；caveatOk 判「解释是否与命中的口径一致」
  */
 export function judgeAnswer(input: JudgeInput, answer: string): JudgeOutput {
   const nums = extractNumbers(answer);
@@ -134,6 +158,50 @@ export function judgeAnswer(input: JudgeInput, answer: string): JudgeOutput {
       caveatOk: null,
       expected: `${expected.join(', ')}`,
       detail: `覆盖 ${covered}/${expected.length} = ${(ratio * 100).toFixed(0)}%`,
+    };
+  }
+
+  // D 类口径题：没有唯一正确答案，判「落在某一套可接受口径上，且解释与该口径一致」。
+  // 这是 W3 第四轮停手后补的做法（docs/ACCEPTANCE-W3.md 7.3）——上一版用单一数字判，
+  // 同一道题四次跑给四个数、四个都对，全被判成失败。
+  if (input.mode === 'interpretations') {
+    const cands = (input.interpretations ?? []).filter(
+      (i): i is Interpretation & { value: number } =>
+        typeof i.value === 'number' && Number.isFinite(i.value),
+    );
+    if (cands.length === 0) {
+      // 静默返回「未命中」会让校准漏掉的条目看起来像模型答错，必须炸出来
+      throw new Error('interpretations 模式至少需要一个已校准 value 的口径');
+    }
+
+    const hits = cands
+      .map((i) => ({ interp: i, m: matchesReference(answer, nums, i.value, tol, input.unit) }))
+      .filter((x): x is { interp: (typeof cands)[number]; m: { value: number; at: number } } => x.m !== null)
+      // 取文中位置最靠前的那个：结论在前，分项在后。
+      .sort((a, b) => a.m.at - b.m.at);
+    const matched = hits[0]?.interp;
+    const expected = cands.map((i) => `${i.label} ${i.value}${input.unit ? ' ' + input.unit : ''}`).join(' / ');
+
+    if (!matched) {
+      return {
+        hit: false,
+        caveatOk: false,
+        expected,
+        detail: `未命中任何可接受口径（共 ${cands.length} 个）`,
+      };
+    }
+
+    // 口径说明：优先用该口径自己的词；没配就退回题目级关键词；都没有则判不了（null）
+    const kws = matched.keywords?.length ? matched.keywords : (input.caveatKeywords ?? []);
+    const said = kws.length === 0 ? null : kws.some((k) => answer.includes(k));
+    return {
+      hit: true,
+      caveatOk: said,
+      expected,
+      detail:
+        `命中「${matched.label}」` +
+        (hits.length > 1 ? `（${hits.length} 个口径的数都在答案里，取最靠前的）` : '') +
+        (said === true ? '，且解释了该口径' : said === false ? '，但没解释口径（数字对、解释缺失）' : '，该口径无关键词、无法判说明'),
     };
   }
 
