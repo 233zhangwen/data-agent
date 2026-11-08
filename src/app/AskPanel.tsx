@@ -18,7 +18,7 @@
  */
 
 import { useChat } from '@ai-sdk/react';
-import type { UIMessage } from 'ai';
+import { DefaultChatTransport, type UIMessage } from 'ai';
 import { useMemo, useRef, useState } from 'react';
 import {
   Bar,
@@ -355,10 +355,21 @@ function isProposal(v: unknown): v is ProposalLike {
   return typeof v === 'object' && v !== null && 'proposalId' in v && 'status' in v;
 }
 
+/** useChat 的传输层：指到 /api/ask。模块级单例，避免每次渲染新建实例。 */
+let _askTransport: DefaultChatTransport<UIMessage> | undefined;
+function askTransport() {
+  return (_askTransport ??= new DefaultChatTransport({ api: '/api/ask' }));
+}
+
 export function AskPanel() {
   const startRef = useRef(0);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const { messages, sendMessage, status, error } = useChat({
+    // ⚠️ 不配 transport 时默认端点是 /api/chat，而我们的路由在 /api/ask ——
+    // 打过去是 404 的 HTML 错误页，useChat 会把它当文本流渲染进对话（实测踩过）。
+    // transport 提到模块渲染外会导致每帧新建实例，放组件内 const 也行，但这里
+    // 用惰性单例：整个页面生命周期共用一个 transport。
+    transport: askTransport(),
     // onFinish 是回调不是 effect，在这里 setState 是安全的
     onFinish: () => {
       if (startRef.current) setElapsed(Date.now() - startRef.current);
