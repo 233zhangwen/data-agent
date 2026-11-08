@@ -18,6 +18,7 @@ import {
 } from 'ai';
 
 import { createDataAgent } from '@/lib/agent';
+import { streamAgentTurn } from '@/lib/agent-stream';
 import { newSessionId, readSessionId, serializeSessionCookie } from '@/lib/session-cookie';
 
 /** Agent 循环可能要跑十几秒（多次 SQL），给足函数执行时间。 */
@@ -42,12 +43,14 @@ export async function POST(req: Request) {
   try {
     // ⚠️ stream() 是 async 的（返回 Promise<StreamTextResult>），必须 await ——
     // AI SDK 7 的 ToolLoopAgent.stream 与 streamText 的同步签名不同，这里踩过一次。
-    const result = await agent.stream({
+    // 走 streamAgentTurn 而不是直接 agent.stream：它会在"一个字都没说出来"时兜底收口
+    // （agent-stream.ts），UI 与评测看到的是同一条路径。
+    const turn = await streamAgentTurn(agent, {
       messages: await convertToModelMessages(messages),
     });
 
     return createUIMessageStreamResponse({
-      stream: toUIMessageStream({ stream: result.stream }),
+      stream: toUIMessageStream({ stream: turn.stream }),
       headers: setCookie,
     });
   } catch (e) {

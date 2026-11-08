@@ -37,8 +37,14 @@ import {
 import { createProposal, SaveQueryRejected } from './save-query';
 import { rankTables } from './schema-search';
 import { TABLE_DOCS, TABLE_DOC_MAP } from './schema-docs';
+import { planStep } from './step-budget';
 
-/** 一次问答最多几步。一个有代表性的分析是：列表 → 看结构 → 查 → 改 → 查 → 作答 = 6 步。 */
+/**
+ * 一次问答最多几步（= 最多几次模型调用）。有代表性的分析是：
+ * 列表 → 看结构 → 查 → 改 → 查 → 作答 = 6 步。
+ *
+ * 注意最后一格**不给工具**（step-budget.ts）：实际可用工具步数 9 步 + 1 步作答。
+ */
 export const MAX_STEPS = 10;
 
 /** 同一条 SQL 连续失败的上限：超过就停，别让模型在同一个坑里烧 token。 */
@@ -65,7 +71,7 @@ const globalForProvider = globalThis as unknown as {
   __dataAgentProvider?: Partial<Record<'disabled' | 'enabled', Provider>>;
 };
 
-function getProvider(thinking: 'disabled' | 'enabled'): Provider {
+export function getProvider(thinking: 'disabled' | 'enabled'): Provider {
   const cache = (globalForProvider.__dataAgentProvider ??= {});
   const cached = cache[thinking];
   if (cached) return cached;
@@ -81,6 +87,11 @@ function getProvider(thinking: 'disabled' | 'enabled'): Provider {
   });
   cache[thinking] = provider;
   return provider;
+}
+
+/** 同一个模型实例给两条路径用：主循环（ToolLoopAgent）和兜底收口（generateText）。 */
+export function getChatModel(thinking: 'disabled' | 'enabled' = 'disabled') {
+  return getProvider(thinking)(process.env.LLM_MODEL || 'deepseek-flash');
 }
 
 // ---------------------------------------------------------------- 结果格式化
@@ -413,11 +424,30 @@ export function createDataAgent(
   } = {},
 ) {
   return new ToolLoopAgent({
-    model: getProvider(opts.thinking ?? 'disabled')(process.env.LLM_MODEL || 'deepseek-flash'),
+    model: getChatModel(opts.thinking ?? 'disabled'),
     // ToolLoopAgent 里这个字段叫 instructions（不是 streamText 的 system）——
     // 语义相同，只是 Agent 抽象把"给模型的行为说明"独立命名了。
     instructions: PROMPT.system,
     tools: makeTools(opts),
+    /**
+     * 每一步前把"还剩几步"写进 instructions，并在最后一格关掉工具（step-budget.ts）。
+     *
+     * 为什么不用「工具返回里附加剩余步数」：那只有调了工具才看得到，而模型决定
+     * "要不要再查一次"恰恰发生在调工具之前。prepareStep 是唯一能在模型开口前
+     * 说话的位置。
+     */
+    prepareStep: ({ stepNumber }) => {
+      const plan = planStep(stepNumber, MAX_STEPS);
+      const instructions = `${PROMPT.system}\n\n${plan.notice}`;
+      // 最后一格：工具物理关闭，模型只能写字。光靠"请回答"是软约束，模型可能
+      // 再调一次工具把预算撞死；toolChoice:'none' 是硬约束。
+      if (plan.mustAnswer) {
+        // 留痕：这条日志出现，说明这一轮是把预算烧完才收口的（用于事后统计空答案风险面）
+        console.log('[step-budget] 最后一格：关闭工具，强制作答');
+        return { instructions, toolChoice: 'none' };
+      }
+      return { instructions };
+    },
     // 步数上限 = 账单上限。没有上限的 agent 循环 = 没有上限的成本。
     stopWhen: ({ steps }) => steps.length >= MAX_STEPS,
   });
