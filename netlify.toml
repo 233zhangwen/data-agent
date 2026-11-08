@@ -1,0 +1,21 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# Next.js 16 在 Netlify 上需要这个适配器（项目 #1 用的同一套）
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# 问答端点要跑 30 秒以上（多次 SQL + 模型思考），
+# Netlify Functions 默认 10 秒，必须抬到 60（route 里已声明 maxDuration = 60）
+[functions]
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
